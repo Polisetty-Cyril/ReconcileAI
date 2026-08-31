@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     DATE_TOLERANCE_DAYS: int = 3  # Acceptable date gap between gateway captured date and bank value date
     ANOMALY_ZSCORE_THRESHOLD: float = 2.5  # Standard deviations for amount anomaly
 
+    # Phase 7 — Fuzzy Matching Thresholds
+    FUZZY_MATCH_THRESHOLD: float = 85.0   # >= this → FUZZY_MATCHED (auto-resolved with note)
+    FUZZY_REVIEW_THRESHOLD: float = 70.0  # >= this but < FUZZY_MATCH_THRESHOLD → FUZZY_REVIEW
+
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore")
 
 settings = Settings()
