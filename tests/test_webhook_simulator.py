@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from backend.main import app
+from backend.config import settings
 from backend.database import SessionLocal, init_db
 from backend.models import (
     Transaction,
@@ -37,12 +38,23 @@ from backend.models import (
     ReconciliationException
 )
 from backend.services.webhook import WebhookSimulatorService
+from backend.services.security import generate_webhook_signature
 from backend.schemas.webhook import PaymentWebhookPayload
 from backend.services.reconciliation import DeterministicReconciliationEngine
 from backend.services.fuzzy_matcher import FuzzyMatchEngine
 from backend.services.ai_controller import AIController
 
 client = TestClient(app)
+
+def post_signed_webhook(client, payload_dict):
+    """Helper to post a signed webhook using settings.WEBHOOK_SECRET."""
+    raw_body = json.dumps(payload_dict).encode("utf-8")
+    sig = generate_webhook_signature(raw_body, settings.WEBHOOK_SECRET)
+    return client.post(
+        "/webhook/payment",
+        content=raw_body,
+        headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig}
+    )
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_db():
@@ -89,7 +101,7 @@ def test_webhook_payment_authorized_success():
         "timestamp": "2026-03-01T10:00:00Z"
     }
 
-    response = client.post("/webhook/payment", json=payload)
+    response = post_signed_webhook(client, payload)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
@@ -142,7 +154,7 @@ def test_webhook_payment_captured_success():
         "description": "Captured UPI payment"
     }
 
-    response = client.post("/webhook/payment", json=payload)
+    response = post_signed_webhook(client, payload)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
@@ -173,7 +185,7 @@ def test_webhook_payment_failed_success():
         "description": "Payment failed due to insufficient funds"
     }
 
-    response = client.post("/webhook/payment", json=payload)
+    response = post_signed_webhook(client, payload)
     assert response.status_code == 200
 
     db = SessionLocal()
@@ -198,7 +210,7 @@ def test_webhook_refund_created_success():
         "description": "Partial refund processed"
     }
 
-    response = client.post("/webhook/payment", json=payload)
+    response = post_signed_webhook(client, payload)
     assert response.status_code == 200
 
     db = SessionLocal()
@@ -223,7 +235,7 @@ def test_webhook_invalid_event_type_rejected():
         "payment_id": "TEST_PAY_INV_001",
         "amount": 500.00
     }
-    response = client.post("/webhook/payment", json=payload)
+    response = post_signed_webhook(client, payload)
     assert response.status_code in (400, 422)
 
 def test_webhook_missing_required_fields_rejected():
@@ -234,7 +246,7 @@ def test_webhook_missing_required_fields_rejected():
         "event_type": "payment.captured",
         "amount": 500.00
     }
-    response1 = client.post("/webhook/payment", json=payload1)
+    response1 = post_signed_webhook(client, payload1)
     assert response1.status_code == 422
 
     # Missing event_id
@@ -243,7 +255,7 @@ def test_webhook_missing_required_fields_rejected():
         "payment_id": "TEST_PAY_INV_002",
         "amount": 500.00
     }
-    response2 = client.post("/webhook/payment", json=payload2)
+    response2 = post_signed_webhook(client, payload2)
     assert response2.status_code == 422
 
 def test_webhook_negative_or_zero_amount_rejected():
@@ -254,7 +266,7 @@ def test_webhook_negative_or_zero_amount_rejected():
         "payment_id": "TEST_PAY_INV_003",
         "amount": 0.00
     }
-    response_zero = client.post("/webhook/payment", json=payload_zero)
+    response_zero = post_signed_webhook(client, payload_zero)
     assert response_zero.status_code in (400, 422)
 
     payload_neg = {
@@ -263,15 +275,17 @@ def test_webhook_negative_or_zero_amount_rejected():
         "payment_id": "TEST_PAY_INV_004",
         "amount": -100.00
     }
-    response_neg = client.post("/webhook/payment", json=payload_neg)
+    response_neg = post_signed_webhook(client, payload_neg)
     assert response_neg.status_code in (400, 422)
 
 def test_webhook_malformed_json_rejected():
     """Verify that malformed body returns HTTP 422."""
+    raw_body = b"not-json-content"
+    sig = generate_webhook_signature(raw_body, settings.WEBHOOK_SECRET)
     response = client.post(
         "/webhook/payment",
-        content="not-json-content",
-        headers={"Content-Type": "application/json"}
+        content=raw_body,
+        headers={"Content-Type": "application/json", "X-Razorpay-Signature": sig}
     )
     assert response.status_code == 422
 
@@ -298,7 +312,7 @@ def test_webhook_service_state_update_on_subsequent_event():
         txn1 = db.query(Transaction).filter_by(transaction_id="TEST_PAY_SEQ_001", source="GATEWAY").first()
         assert txn1.status == "AUTHORIZED"
 
-        # Step 2: Captured event for the same payment
+        # Step 2: Captured event for the same payment (new unique event_id)
         cap_payload = PaymentWebhookPayload(
             event_id="TEST_EVT_SEQ_002",
             event_type="payment.captured",
@@ -338,7 +352,7 @@ def test_webhook_transaction_integrates_with_phase6_deterministic_reconciliation
             "currency": "INR",
             "timestamp": "2026-03-01T12:00:00Z"
         }
-        res = client.post("/webhook/payment", json=payload)
+        res = post_signed_webhook(client, payload)
         assert res.status_code == 200
 
         gw_txn = db.query(Transaction).filter_by(transaction_id="TEST_PAY_RECON_001").first()
@@ -408,7 +422,7 @@ def test_webhook_transaction_integrates_with_phase7_fuzzy_matcher():
             "description": "Payment for Acme Corp Invoice",
             "timestamp": "2026-03-01T14:00:00Z"
         }
-        res = client.post("/webhook/payment", json=payload)
+        res = post_signed_webhook(client, payload)
         assert res.status_code == 200
 
         gw_txn = db.query(Transaction).filter_by(transaction_id="TEST_PAY_FUZZY_001").first()
@@ -473,6 +487,3 @@ def test_webhook_transaction_integrates_with_phase8_ai_controller():
     assert decision.recommendation in ("APPROVE", "REJECT", "REVIEW", "ESCALATE")
     assert decision.confidence >= 0.0
     assert decision.risk in ("LOW", "MEDIUM", "HIGH")
-
-
-
