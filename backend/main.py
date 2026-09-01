@@ -17,6 +17,9 @@ from backend.schemas.webhook import PaymentWebhookPayload, WebhookResponse
 from backend.services.webhook import WebhookSimulatorService
 from backend.services.security import verify_webhook_signature
 
+from backend.schemas.exception import ExceptionActionRequest, ExceptionDetailResponse, ExceptionListResponse
+from backend.services.exception_service import ExceptionManagementService
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize database tables on application startup
@@ -148,8 +151,91 @@ async def ingest_payment_webhook(
             detail=f"Webhook processing error: {str(e)}"
         )
 
+# -----------------------------------------------------------------------------
+# Phase 11 — Exception Management Workflow Endpoints
+# -----------------------------------------------------------------------------
+
+@app.get("/exceptions", response_model=ExceptionListResponse, status_code=status.HTTP_200_OK, tags=["Exception Management"])
+def list_exceptions(
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves a paginated list of reconciliation exceptions with optional status, severity, and category filtering.
+    """
+    items, total = ExceptionManagementService.list_exceptions(
+        db=db,
+        status_filter=status,
+        severity_filter=severity,
+        category_filter=category,
+        limit=limit,
+        offset=offset
+    )
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": items
+    }
+
+@app.get("/exceptions/{exception_id}", response_model=ExceptionDetailResponse, status_code=status.HTTP_200_OK, tags=["Exception Management"])
+def get_exception_detail(
+    exception_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves details for a single reconciliation exception.
+    """
+    exc = ExceptionManagementService.get_exception_by_id(db=db, exception_id=exception_id)
+    if not exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Exception '{exception_id}' not found."
+        )
+    return exc
+
+@app.post("/exceptions/{exception_id}/approve", response_model=ExceptionDetailResponse, status_code=status.HTTP_200_OK, tags=["Exception Management"])
+def approve_exception(
+    exception_id: str,
+    action_req: Optional[ExceptionActionRequest] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Human reviewer approval decision for an exception.
+    Sets status to APPROVED, updates linked reconciliation result, and records immutable audit log.
+    """
+    req = action_req or ExceptionActionRequest()
+    return ExceptionManagementService.approve_exception(
+        db=db,
+        exception_id=exception_id,
+        reviewer_id=req.reviewer_id,
+        notes=req.notes
+    )
+
+@app.post("/exceptions/{exception_id}/reject", response_model=ExceptionDetailResponse, status_code=status.HTTP_200_OK, tags=["Exception Management"])
+def reject_exception(
+    exception_id: str,
+    action_req: Optional[ExceptionActionRequest] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Human reviewer rejection decision for an exception.
+    Sets status to REJECTED, updates linked reconciliation result, and records immutable audit log.
+    """
+    req = action_req or ExceptionActionRequest()
+    return ExceptionManagementService.reject_exception(
+        db=db,
+        exception_id=exception_id,
+        reviewer_id=req.reviewer_id,
+        notes=req.notes
+    )
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)
+
 
