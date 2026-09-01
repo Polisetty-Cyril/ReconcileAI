@@ -4,11 +4,14 @@ Provides health checks, system status, and foundation for multi-source reconcili
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, status
+from fastapi import FastAPI, status, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
+from sqlalchemy.orm import Session
 from backend.config import settings
-from backend.database import init_db
+from backend.database import init_db, get_db
+from backend.schemas.webhook import PaymentWebhookPayload, WebhookResponse
+from backend.services.webhook import WebhookSimulatorService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -61,6 +64,24 @@ def root():
         "track": "Razorpay AI Buildathon — Track 04: AI Finance Controller"
     }
 
+@app.post("/webhook/payment", response_model=WebhookResponse, status_code=status.HTTP_200_OK, tags=["Webhook Simulator"])
+def ingest_payment_webhook(
+    payload: PaymentWebhookPayload,
+    db: Session = Depends(get_db)
+):
+    """
+    Receives, validates, and processes incoming payment gateway webhooks.
+    Normalizes payload and persists WebhookEvent, canonical Transaction, and AuditLog.
+    """
+    try:
+        result = WebhookSimulatorService.process_webhook(db=db, payload_data=payload)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Webhook processing error: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)
+
