@@ -12,6 +12,7 @@ from backend.services.reconciliation import (
 )
 from backend.services.fuzzy_matcher import FuzzyMatchEngine
 from backend.services.ai_controller import AIController
+from backend.services.sla_service import SLAService, SLAEvaluationResult
 
 __all__ = [
     "DataNormalizer",
@@ -20,4 +21,6 @@ __all__ = [
     "ReconciliationReasonCode",
     "FuzzyMatchEngine",
     "AIController",
+    "SLAService",
+    "SLAEvaluationResult",
 ]

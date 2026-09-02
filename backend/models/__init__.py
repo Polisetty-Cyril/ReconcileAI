@@ -8,11 +8,13 @@ from backend.models.reconciliation import ReconciliationResult
 from backend.models.webhook import WebhookEvent
 from backend.models.exception import ReconciliationException
 from backend.models.audit import AuditLog
+from backend.models.notification_log import NotificationLog
 
 __all__ = [
     "Transaction",
     "ReconciliationResult",
     "WebhookEvent",
     "ReconciliationException",
-    "AuditLog"
+    "AuditLog",
+    "NotificationLog"
 ]
