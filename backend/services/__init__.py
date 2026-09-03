@@ -17,6 +17,7 @@ from backend.services.escalation_service import EscalationService, EscalationRes
 from backend.services.notification_service import NotificationService, NotificationResult
 from backend.services.email_transport import MockEmailTransport, EmailSendResult
 from backend.services.sla_orchestrator import SLAOrchestrator, OrchestrationResult
+from backend.services.finance_controller import FinanceController
 
 __all__ = [
     "DataNormalizer",
@@ -35,4 +36,5 @@ __all__ = [
     "EmailSendResult",
     "SLAOrchestrator",
     "OrchestrationResult",
+    "FinanceController",
 ]
