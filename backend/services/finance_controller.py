@@ -235,7 +235,19 @@ class FinanceController:
 
         # Fast path: deterministic AUTO_RECONCILED bypasses fuzzy and LLM
         if getattr(result, "final_decision", None) == "AUTO_RECONCILED":
-            return self.ai_controller.investigate(result, exception=exception, fuzzy_result=None)
+            ai_res = self.ai_controller.investigate(result, exception=exception, fuzzy_result=None)
+            if persist:
+                session = db or self.db
+                if session is None:
+                    raise ValueError("A database session (db) is required when persist=True.")
+                self.ai_controller.persist_result(
+                    session,
+                    result,
+                    ai_res,
+                    exception=exception,
+                    fuzzy_result=None,
+                )
+            return ai_res
 
         # On-demand fuzzy investigation if fuzzy_result was not supplied
         if fuzzy_result is None and (
@@ -270,3 +282,107 @@ class FinanceController:
             )
 
         return ai_result
+
+    def reconcile_and_investigate(
+        self,
+        transactions: Optional[List[Union[Transaction, CanonicalTransaction]]] = None,
+        db: Optional[Session] = None,
+        persist: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Executes the end-to-end reconciliation and investigation workflow:
+        Observe -> Deterministic Reconcile -> Detect Anomaly -> Fuzzy Investigate -> AI Reason -> Enriched Summary.
+
+        Composes existing reconciliation, fuzzy investigation, and AI reasoning primitives
+        without duplicating logic or mutating financial invariants.
+
+        Safety Invariants:
+        - Advisory only: AI recommendations never approve or reject exceptions.
+        - Unresolved discrepancies strictly retain is_resolved=False.
+        - Exception status strictly remains OPEN.
+        - Transaction amounts, currencies, and balances remain untouched.
+        - Does NOT commit database transactions internally.
+
+        Parameters
+        ----------
+        transactions : Optional[List[Union[Transaction, CanonicalTransaction]]]
+            Transactions to reconcile. If None and db is available, loaded from db.
+        db : Optional[Session]
+            SQLAlchemy database session for persistence operations.
+        persist : bool
+            If True, stages results, exceptions, AI fields, and AuditLog entries in the session.
+            Does NOT commit inside FinanceController.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Deterministic reconciliation summary enriched with "ai_results": List[AIControllerResult].
+        """
+        session = db or self.db
+        if persist and session is None:
+            raise ValueError("A database session (db) is required when persist=True.")
+
+        # Step 1: Run deterministic reconciliation
+        summary = self.reconcile(transactions=transactions, db=session, persist=persist)
+
+        # Build transaction lookups using actual identifiers
+        if transactions is None and session is not None:
+            all_txns: List[Any] = session.query(Transaction).all()
+        else:
+            all_txns = list(transactions or [])
+
+        txn_by_id: Dict[str, Any] = {
+            t.transaction_id: t
+            for t in all_txns
+            if getattr(t, "transaction_id", None)
+        }
+        candidate_banks = [
+            t for t in all_txns
+            if getattr(t, "source", "").upper() == "BANK"
+        ]
+
+        # Index exceptions by reconciliation_id (safe, non-positional correlation)
+        exceptions = summary.get("exceptions", [])
+        exceptions_by_recon_id: Dict[str, ReconciliationException] = {
+            exc.reconciliation_id: exc
+            for exc in exceptions
+            if getattr(exc, "reconciliation_id", None)
+        }
+
+        # Step 2: Process every reconciliation result
+        ai_results: List[AIControllerResult] = []
+        for result in summary.get("results", []):
+            if getattr(result, "final_decision", None) == "AUTO_RECONCILED":
+                # Step 2A: Exact match fast path
+                ai_res = self.investigate_with_ai(
+                    result=result,
+                    persist=persist,
+                    db=session,
+                )
+            else:
+                # Step 2B: Unresolved / Human Review discrepancy
+                recon_id = getattr(result, "reconciliation_id", None)
+                exc = exceptions_by_recon_id.get(recon_id) if recon_id else None
+
+                gw_id = getattr(result, "gateway_transaction_id", None)
+                bnk_id = getattr(result, "bank_transaction_id", None)
+
+                gw_txn = txn_by_id.get(gw_id) if gw_id else None
+                bnk_txn = txn_by_id.get(bnk_id) if bnk_id else None
+
+                # Steps 3 & 4: Fuzzy investigation & AI reasoning via investigate_with_ai
+                ai_res = self.investigate_with_ai(
+                    result=result,
+                    exception=exc,
+                    gateway_txn=gw_txn,
+                    bank_txn=bnk_txn,
+                    candidate_banks=candidate_banks if (gw_txn and not bnk_txn) else None,
+                    persist=persist,
+                    db=session,
+                )
+
+            ai_results.append(ai_res)
+
+        # Step 6: Return enriched summary
+        summary["ai_results"] = ai_results
+        return summary
