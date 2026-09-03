@@ -4,7 +4,7 @@ Defines raw schemas for heterogeneous inputs and the unified CanonicalTransactio
 """
 
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, ConfigDict
 
 class CanonicalTransaction(BaseModel):
@@ -73,3 +73,42 @@ class ERPRawInput(BaseModel):
     invoice_date: Optional[Any] = None
     payment_status: Optional[str] = None
     reference_id: Optional[str] = None
+
+class TransactionResponse(BaseModel):
+    """Schema representing a persisted canonical Transaction."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    transaction_id: str
+    source: str
+    reference_id: Optional[str] = None
+    order_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    amount: float
+    currency: str
+    transaction_date: datetime
+    status: str
+    transaction_type: str
+    description: Optional[str] = None
+    metadata_json: Optional[str] = None
+    created_at: datetime
+
+class TransactionListResponse(BaseModel):
+    """Paginated list of transactions."""
+    model_config = ConfigDict(extra="ignore")
+
+    total: int
+    limit: int
+    offset: int
+    items: List[TransactionResponse] = Field(default_factory=list)
+
+class SyntheticLoadResponse(BaseModel):
+    """Summary outcome of loading synthetic transaction CSV files."""
+    model_config = ConfigDict(extra="ignore")
+
+    status: str
+    gateway_loaded: int
+    bank_loaded: int
+    erp_loaded: int
+    total_loaded: int
+    message: str
