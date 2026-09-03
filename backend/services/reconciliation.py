@@ -16,6 +16,7 @@ from backend.models.transaction import Transaction
 from backend.models.reconciliation import ReconciliationResult
 from backend.models.exception import ReconciliationException
 from backend.schemas.transaction import CanonicalTransaction
+from backend.services.audit_service import AuditService
 
 class ReconciliationReasonCode:
     """Standardized deterministic reason codes for explainability."""
@@ -525,12 +526,37 @@ class DeterministicReconciliationEngine:
             transactions = db.query(Transaction).all()
 
         summary = self.reconcile_transactions(transactions)
-        
-        # Persist results and exceptions
+        audit_service = AuditService(db=db)
+
+        # Persist results and exceptions with audit logging
         for res in summary["results"]:
             db.add(res)
+            target_id = res.gateway_transaction_id or res.bank_transaction_id or res.reconciliation_id
+            audit_service.log_action(
+                actor="SYSTEM",
+                action="RECONCILIATION_COMPLETED",
+                entity="RECONCILIATION",
+                entity_id=target_id,
+                new_value=res.final_decision,
+                reason=f"Deterministic matching: recon_id={res.reconciliation_id}, score={res.match_score:.1f}, method={res.matching_method}",
+                commit=False,
+            )
         for exc in summary["exceptions"]:
             db.add(exc)
+            audit_service.log_action(
+                actor="SYSTEM",
+                action="EXCEPTION_CREATED",
+                entity="EXCEPTION",
+                entity_id=exc.exception_id,
+                new_value=json.dumps({
+                    "status": exc.status,
+                    "severity": exc.severity,
+                    "category": exc.category,
+                    "difference_amount": exc.difference_amount,
+                }),
+                reason=f"Discrepancy in recon_id={exc.reconciliation_id}: {exc.ai_explanation[:300]}",
+                commit=False,
+            )
 
         db.commit()
 

@@ -16,6 +16,7 @@ Safety Invariants:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Union
 from sqlalchemy.orm import Session
@@ -28,6 +29,7 @@ from backend.schemas.ai_controller import AIControllerResult
 from backend.services.reconciliation import DeterministicReconciliationEngine
 from backend.services.fuzzy_matcher import FuzzyMatchEngine, FuzzyMatchResult
 from backend.services.ai_controller import AIController
+from backend.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +275,33 @@ class FinanceController:
             session = db or self.db
             if session is None:
                 raise ValueError("A database session (db) is required when persist=True.")
+
+            # Record FUZZY_INVESTIGATED when fuzzy investigation was performed
+            # (bypassed for AUTO_RECONCILED)
+            if fuzzy_result is not None and getattr(result, "final_decision", "") != "AUTO_RECONCILED":
+                composite_score = getattr(fuzzy_result, "composite_score", None)
+                decision = getattr(fuzzy_result, "decision", None)
+                if composite_score is None and isinstance(fuzzy_result, dict):
+                    composite_score = fuzzy_result.get("composite_score")
+                if decision is None and isinstance(fuzzy_result, dict):
+                    decision = fuzzy_result.get("decision")
+
+                AuditService(db=session).log_action(
+                    actor="FINANCE_CONTROLLER",
+                    action="FUZZY_INVESTIGATED",
+                    entity="RECONCILIATION",
+                    entity_id=getattr(result, "gateway_transaction_id", None) or getattr(result, "bank_transaction_id", None) or getattr(result, "reconciliation_id", "UNKNOWN"),
+                    new_value=json.dumps({
+                        "reconciliation_id": getattr(result, "reconciliation_id", None),
+                        "gateway_transaction_id": getattr(result, "gateway_transaction_id", None),
+                        "bank_transaction_id": getattr(result, "bank_transaction_id", None),
+                        "composite_score": composite_score,
+                        "fuzzy_decision": decision,
+                    }),
+                    reason=f"Fuzzy investigation completed: score={composite_score}, decision={decision}",
+                    commit=False,
+                )
+
             self.ai_controller.persist_result(
                 session,
                 result,

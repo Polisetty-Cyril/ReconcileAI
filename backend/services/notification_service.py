@@ -13,6 +13,7 @@ Safety Rules:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.models.exception import ReconciliationException
 from backend.models.notification_log import NotificationLog
 from backend.services.email_transport import MockEmailTransport
+from backend.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -303,10 +305,27 @@ class NotificationService:
 
         delivery_timestamp = now if now is not None else datetime.now(timezone.utc)
 
+        audit_service = AuditService(db=db)
+
         if send_result.success:
             notif.status = "SENT"
             notif.sent_at = delivery_timestamp
             db.add(notif)
+            audit_service.log_action(
+                actor="SYSTEM",
+                action="NOTIFICATION_DISPATCHED",
+                entity="NOTIFICATION",
+                entity_id=notif.notification_id,
+                new_value=json.dumps({
+                    "exception_id": notif.exception_id,
+                    "event_type": notif.event_type,
+                    "recipient_role": notif.recipient_role,
+                    "recipient_email": notif.recipient_email,
+                    "delivery_status": "SENT",
+                }),
+                reason=f"Operational notification delivered to {notif.recipient_email}",
+                commit=False,
+            )
             db.commit()
             db.refresh(notif)
             return NotificationResult(
@@ -327,6 +346,21 @@ class NotificationService:
             notif.status = "FAILED"
             # On failed mock delivery: do NOT set sent_at
             db.add(notif)
+            audit_service.log_action(
+                actor="SYSTEM",
+                action="NOTIFICATION_DISPATCHED",
+                entity="NOTIFICATION",
+                entity_id=notif.notification_id,
+                new_value=json.dumps({
+                    "exception_id": notif.exception_id,
+                    "event_type": notif.event_type,
+                    "recipient_role": notif.recipient_role,
+                    "recipient_email": notif.recipient_email,
+                    "delivery_status": "FAILED",
+                }),
+                reason=f"Operational notification delivery failed: {send_result.error}",
+                commit=False,
+            )
             db.commit()
             db.refresh(notif)
             return NotificationResult(

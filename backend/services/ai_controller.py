@@ -17,6 +17,7 @@ Architectural boundaries
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.models.audit import AuditLog
 from backend.models.exception import ReconciliationException
+from backend.services.audit_service import AuditService
 from backend.models.reconciliation import ReconciliationResult
 from backend.schemas.ai_controller import AIControllerResult
 from backend.services.fuzzy_matcher import FuzzyMatchEngine, FuzzyMatchResult
@@ -324,19 +326,19 @@ class AIController:
             exception.ai_explanation = ai_result.reason
             db.add(exception)
 
-        # Append AuditLog entry
-        audit = AuditLog(
-            audit_id=f"AUD_AI_{uuid.uuid4().hex[:12].upper()}",
-            timestamp=datetime.now(timezone.utc),
+        audit_service = AuditService(db=db)
+
+        # Record AI_REASONED via AuditService
+        audit_service.log_action(
             actor="AI_CONTROLLER",
             action="AI_REASONED",
             entity="RECONCILIATION",
             entity_id=getattr(result, "reconciliation_id", "UNKNOWN"),
             old_value=getattr(result, "final_decision", None),
             new_value=ai_result.recommendation,
-            reason=ai_result.reason[:500],  # truncate for audit column
+            reason=ai_result.reason[:500] if ai_result.reason else None,
+            commit=False,
         )
-        db.add(audit)
 
         return ai_result
 

@@ -25,6 +25,7 @@ from backend.services.sla_service import SLAService
 from backend.services.escalation_service import EscalationService
 from backend.services.notification_service import NotificationService, NotificationResult
 from backend.services.email_transport import MockEmailTransport
+from backend.services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +98,69 @@ class SLAOrchestrator:
             return None
 
         norm_now = SLAService.normalize_utc_datetime(now)
+        audit_service = AuditService(db=db)
 
         # Step 2: SLA evaluation via SLAService
+        old_sla_status = exception.sla_status
         sla_eval = SLAService.evaluate_exception(exception, now=norm_now)
         if not sla_eval:
             return None
+
+        # Audit meaningful SLA state transition (only once on actual transition)
+        new_sla_status = exception.sla_status
+        if new_sla_status != old_sla_status:
+            if new_sla_status == "WARNING":
+                audit_service.log_action(
+                    actor="SYSTEM",
+                    action="SLA_WARNING",
+                    entity="EXCEPTION",
+                    entity_id=exception.exception_id,
+                    old_value=old_sla_status,
+                    new_value="WARNING",
+                    reason=f"SLA warning threshold reached (elapsed ratio: {sla_eval.elapsed_ratio:.2f})",
+                    commit=False,
+                )
+            elif new_sla_status == "BREACHED":
+                audit_service.log_action(
+                    actor="SYSTEM",
+                    action="SLA_BREACHED",
+                    entity="EXCEPTION",
+                    entity_id=exception.exception_id,
+                    old_value=old_sla_status,
+                    new_value="BREACHED",
+                    reason=f"SLA breach occurred (elapsed ratio: {sla_eval.elapsed_ratio:.2f})",
+                    commit=False,
+                )
 
         # Step 3: Escalation evaluation via EscalationService
         esc_eval = EscalationService.evaluate_exception(exception, now=norm_now)
         escalation_changed = esc_eval.transitioned if esc_eval else False
         current_level = exception.escalation_level if exception.escalation_level is not None else 0
+
+        # Audit meaningful Escalation transition (only once on actual transition)
+        if escalation_changed and esc_eval:
+            if esc_eval.new_level == 1:
+                audit_service.log_action(
+                    actor="SYSTEM",
+                    action="ESCALATION_L1",
+                    entity="EXCEPTION",
+                    entity_id=exception.exception_id,
+                    old_value=str(esc_eval.previous_level),
+                    new_value="1",
+                    reason=f"Escalated to Level 1 (Finance Supervisor).",
+                    commit=False,
+                )
+            elif esc_eval.new_level == 2:
+                audit_service.log_action(
+                    actor="SYSTEM",
+                    action="ESCALATION_L2",
+                    entity="EXCEPTION",
+                    entity_id=exception.exception_id,
+                    old_value=str(esc_eval.previous_level),
+                    new_value="2",
+                    reason=f"Escalated to Level 2 (Finance Director).",
+                    commit=False,
+                )
 
         # Step 4: Persist SLA and escalation changes to DB
         db.add(exception)

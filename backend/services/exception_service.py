@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.models.exception import ReconciliationException
 from backend.models.reconciliation import ReconciliationResult
 from backend.models.audit import AuditLog
+from backend.services.audit_service import AuditService
 
 class ExceptionManagementService:
     """Service managing reconciliation exceptions lifecycle and human reviewer decisions."""
@@ -113,10 +114,8 @@ class ExceptionManagementService:
                 recon.is_resolved = True
                 recon.final_decision = "MANUAL_APPROVED"
 
-        # 3. Create immutable AuditLog entry
-        audit_entry = AuditLog(
-            audit_id=f"AUD_EXC_APP_{uuid.uuid4().hex[:12].upper()}",
-            timestamp=resolved_time,
+        # 3. Create immutable AuditLog entry via AuditService
+        AuditService(db=db).log_action(
             actor=reviewer_id,
             action="EXCEPTION_APPROVED",
             entity="EXCEPTION",
@@ -127,9 +126,9 @@ class ExceptionManagementService:
                 "resolved_by": reviewer_id,
                 "reviewer_notes": notes
             }),
-            reason=notes or "Approved by human reviewer"
+            reason=notes or "Approved by human reviewer",
+            commit=False
         )
-        db.add(audit_entry)
 
         # Commit all state transitions atomically
         db.commit()
@@ -193,10 +192,8 @@ class ExceptionManagementService:
                 recon.is_resolved = True
                 recon.final_decision = "MANUAL_REJECTED"
 
-        # 3. Create immutable AuditLog entry
-        audit_entry = AuditLog(
-            audit_id=f"AUD_EXC_REJ_{uuid.uuid4().hex[:12].upper()}",
-            timestamp=resolved_time,
+        # 3. Create immutable AuditLog entry via AuditService
+        AuditService(db=db).log_action(
             actor=reviewer_id,
             action="EXCEPTION_REJECTED",
             entity="EXCEPTION",
@@ -207,9 +204,9 @@ class ExceptionManagementService:
                 "resolved_by": reviewer_id,
                 "reviewer_notes": notes
             }),
-            reason=notes or "Rejected by human reviewer"
+            reason=notes or "Rejected by human reviewer",
+            commit=False
         )
-        db.add(audit_entry)
 
         # Commit all state transitions atomically
         db.commit()
