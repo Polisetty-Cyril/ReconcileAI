@@ -21,8 +21,10 @@ from typing import Any, Dict, List, Optional, Union
 from sqlalchemy.orm import Session
 
 from backend.models.transaction import Transaction
+from backend.models.reconciliation import ReconciliationResult
 from backend.schemas.transaction import CanonicalTransaction
 from backend.services.reconciliation import DeterministicReconciliationEngine
+from backend.services.fuzzy_matcher import FuzzyMatchEngine, FuzzyMatchResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class FinanceController:
         self,
         db: Optional[Session] = None,
         engine: Optional[DeterministicReconciliationEngine] = None,
+        fuzzy_engine: Optional[FuzzyMatchEngine] = None,
     ) -> None:
         """
         Initializes the Finance Controller.
@@ -50,9 +53,12 @@ class FinanceController:
             SQLAlchemy database session for persistence operations.
         engine : Optional[DeterministicReconciliationEngine]
             Deterministic reconciliation engine instance (injected for testing or configuration).
+        fuzzy_engine : Optional[FuzzyMatchEngine]
+            Fuzzy matching engine instance (injected for testing or configuration).
         """
         self.db = db
         self.engine = engine or DeterministicReconciliationEngine()
+        self.fuzzy_engine = fuzzy_engine or FuzzyMatchEngine()
 
     def reconcile(
         self,
@@ -117,3 +123,55 @@ class FinanceController:
         Alias for reconcile() representing the Stage-1 deterministic orchestration boundary.
         """
         return self.reconcile(transactions=transactions, db=db, persist=persist)
+
+    def investigate_with_fuzzy(
+        self,
+        result: Optional[ReconciliationResult] = None,
+        gateway_txn: Optional[Any] = None,
+        bank_txn: Optional[Any] = None,
+        candidate_banks: Optional[List[Any]] = None,
+    ) -> Optional[FuzzyMatchResult]:
+        """
+        Investigates an unresolved transaction or candidate pair using RapidFuzz string similarity.
+
+        Safety Invariants:
+        - Investigation-only boundary: returns FuzzyMatchResult evidence without financial mutations.
+        - Does NOT modify ReconciliationResult fields or mark is_resolved=True.
+        - Does NOT create, approve, reject, or resolve ReconciliationException records.
+        - Does NOT persist records to the database.
+        - Does NOT invoke AIController, Gemini, or any LLM.
+
+        Parameters
+        ----------
+        result : Optional[ReconciliationResult]
+            Prior reconciliation result, if available. If result is AUTO_RECONCILED,
+            fuzzy matching is bypassed immediately (returns None).
+        gateway_txn : Optional[Any]
+            Gateway transaction object to match.
+        bank_txn : Optional[Any]
+            Specific Bank transaction object for pairwise scoring.
+        candidate_banks : Optional[List[Any]]
+            Candidate Bank transactions to search through.
+
+        Returns
+        -------
+        Optional[FuzzyMatchResult]
+            The outcome of the fuzzy comparison, or None if bypassed.
+        """
+        # Path A: Exact-match fast path
+        if result is not None and getattr(result, "final_decision", None) == "AUTO_RECONCILED":
+            return None
+
+        # Path B: Pairwise comparison
+        if gateway_txn is not None and bank_txn is not None:
+            return self.fuzzy_engine.score_pair(gateway_txn, bank_txn)
+
+        # Path C: Candidate search
+        if gateway_txn is not None and candidate_banks is not None:
+            matches = self.fuzzy_engine.find_best_candidates([gateway_txn], candidate_banks)
+            return matches[0] if matches else None
+
+        raise ValueError(
+            "Must provide either (gateway_txn, bank_txn) for pairwise investigation "
+            "or (gateway_txn, candidate_banks) for candidate investigation."
+        )
