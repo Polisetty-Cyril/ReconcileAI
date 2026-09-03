@@ -551,6 +551,31 @@ def get_operational_summary(
         "sla_status_breakdown": sla_counts
     }
 
+# -----------------------------------------------------------------------------
+# Phase 15 Extension — Benchmark Runner Endpoint
+# -----------------------------------------------------------------------------
+
+@app.post("/benchmark/run", status_code=status.HTTP_200_OK, tags=["Evaluation"])
+def run_evaluation_benchmark(
+    is_held_out: bool = Query(False, description="Run on held-out split (True) or primary ground truth (False)"),
+    data_dir: str = Query("data", description="Directory containing benchmark CSV datasets")
+):
+    """
+    Executes the non-mutating Phase 13 Reconciliation Benchmark against ground truth datasets.
+    Evaluates classification metrics, operational statistics, financial Value-at-Risk, and throughput.
+    """
+    try:
+        from evaluation.benchmark import ReconciliationBenchmark
+        report = ReconciliationBenchmark.run_benchmark(data_dir=data_dir, is_held_out=is_held_out)
+        return report.to_dict()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Benchmark execution failed: {str(e)}"
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)

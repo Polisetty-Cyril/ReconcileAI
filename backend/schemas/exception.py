@@ -36,6 +36,13 @@ class ExceptionDetailResponse(BaseModel):
     resolved_at: Optional[datetime] = Field(None, description="Timestamp when the exception was resolved")
     created_at: datetime = Field(..., description="Timestamp when the exception was created")
 
+    # Phase 12A / Phase 15 — SLA Monitoring & Escalation Fields
+    sla_duration_hours: Optional[float] = Field(24.0, description="Agreed SLA window in hours")
+    sla_deadline: Optional[datetime] = Field(None, description="Timestamp by which exception must be addressed")
+    sla_status: Optional[str] = Field("OK", description="Current SLA status: OK, WARNING, BREACHED")
+    escalation_level: Optional[int] = Field(0, description="Escalation hierarchy level (0=Primary, 1=Supervisor, 2=Director)")
+    escalated_at: Optional[datetime] = Field(None, description="Timestamp when escalation occurred")
+
 class ExceptionListResponse(BaseModel):
     """
     Paginated list response for querying reconciliation exceptions.
