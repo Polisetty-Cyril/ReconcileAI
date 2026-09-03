@@ -145,9 +145,14 @@ class AIController:
         if client is not None:
             self._client = client
         else:
+            api_key = (
+                settings.GEMINI_API_KEY
+                if settings.LLM_PROVIDER == "gemini" and settings.GEMINI_API_KEY
+                else settings.LLM_API_KEY
+            )
             self._client = get_llm_client(
                 provider=settings.LLM_PROVIDER,
-                api_key=settings.LLM_API_KEY,
+                api_key=api_key,
             )
 
     # ------------------------------------------------------------------

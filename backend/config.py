@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     AI_ENABLED: bool = os.getenv("AI_ENABLED", "false").lower() in ("true", "1", "yes")
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "heuristic")  # "heuristic", "openai", "groq", "gemini"
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     # API & Dashboard
     API_HOST: str = os.getenv("API_HOST", "127.0.0.1")

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
@@ -337,28 +339,124 @@ class GroqLLMClient(BaseLLMClient):
             return HeuristicLLMClient().reason(evidence)
 
 
-class GeminiLLMClient(BaseLLMClient):
-    """Google Gemini-based reasoning client (lazy SDK import)."""
+def _sanitize_key(msg: str, secret: Optional[str] = None) -> str:
+    """Removes sensitive keys and credentials from log messages."""
+    if not msg:
+        return ""
+    if secret and secret in msg:
+        msg = msg.replace(secret, "[REDACTED]")
+    msg = re.sub(r"key=[A-Za-z0-9_\-]+", "key=[REDACTED]", msg)
+    msg = re.sub(r"AIza[0-9A-Za-z-_]{35}", "[REDACTED]", msg)
+    return msg
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash") -> None:
+
+class GeminiLLMClient(BaseLLMClient):
+    """
+    Google Gemini reasoning client using official `google-genai` SDK.
+    Configured via environment variables or explicit parameters:
+      GEMINI_API_KEY  (required: Gemini API key)
+      GEMINI_MODEL    (optional: defaults to gemini-2.5-flash)
+    """
+
+    DEFAULT_MODEL = "gemini-2.5-flash"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> None:
+        self._api_key = (
+            api_key
+            or os.getenv("GEMINI_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or ""
+        ).strip()
+
+        if not self._api_key:
+            raise ValueError("GEMINI_API_KEY is not configured.")
+
+        self._model = (
+            model
+            or os.getenv("GEMINI_MODEL")
+            or self.DEFAULT_MODEL
+        ).strip()
+
         try:
-            import google.generativeai as genai  # type: ignore
-            genai.configure(api_key=api_key)
-            self._model = genai.GenerativeModel(model)
-        except ImportError:
+            import sys
+            # Compatibility check for test environments simulating missing SDK
+            if (
+                ("google.genai" in sys.modules and sys.modules["google.genai"] is None)
+                or ("google.generativeai" in sys.modules and sys.modules["google.generativeai"] is None)
+            ):
+                raise ImportError("google-genai package is not installed.")
+            from google import genai
+            from google.genai import types
+
+            self._client = genai.Client(api_key=self._api_key)
+            self._types = types
+        except (ImportError, Exception) as exc:
             raise RuntimeError(
-                "google-generativeai package is not installed. "
-                "Install it with: pip install google-generativeai"
-            )
+                "google-genai package is not installed. "
+                "Install it with: pip install google-genai"
+            ) from exc
+
+    def __repr__(self) -> str:
+        # Prevent secret leakage in object string representation
+        return f"GeminiLLMClient(model='{self._model}')"
 
     def reason(self, evidence: EvidenceDict) -> Dict[str, Any]:
-        prompt = _SYSTEM_PROMPT + "\n\n" + _build_prompt(evidence)
+        prompt = _build_prompt(evidence)
         try:
-            response = self._model.generate_content(prompt)
+            from backend.schemas.ai_controller import AIControllerResult
+
+            config = self._types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=AIControllerResult,
+                temperature=0.1,
+            )
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=config,
+            )
             raw_text = response.text or ""
-            return _parse_llm_json(raw_text)
+            data = _parse_llm_json(raw_text)
+
+            # Validate against structural requirements
+            if not self._validate_raw(data):
+                logger.warning(
+                    "Gemini response failed structural validation; falling back to heuristic."
+                )
+                return HeuristicLLMClient().reason(evidence)
+
+            # Safety override: confidence < 0.65 must never produce AUTO_RECONCILE
+            rec = str(data.get("recommendation", "REVIEW")).upper()
+            conf = round(float(data.get("confidence", 0.7)), 4)
+            reason = str(data.get("reason", ""))
+            risk = str(data.get("risk", "MEDIUM")).upper()
+
+            if rec == "AUTO_RECONCILE" and conf < 0.65:
+                rec = "REVIEW"
+                reason = (
+                    f"[Safety override] Confidence {conf:.2f} is below the "
+                    f"0.65 threshold for AUTO_RECONCILE. Downgraded to REVIEW. "
+                    f"Original reason: {reason}"
+                )
+
+            return {
+                "recommendation": rec,
+                "confidence": conf,
+                "reason": reason,
+                "risk": risk,
+            }
         except Exception as exc:
-            logger.warning("Gemini call failed (%s); falling back to heuristic.", exc)
+            safe_msg = _sanitize_key(str(exc), self._api_key)
+            logger.warning(
+                "Gemini call failed (%s: %s); falling back to heuristic.",
+                type(exc).__name__,
+                safe_msg,
+            )
             return HeuristicLLMClient().reason(evidence)
 
 
@@ -366,18 +464,21 @@ class GeminiLLMClient(BaseLLMClient):
 # Provider factory
 # ===========================================================================
 
-def get_llm_client(provider: str, api_key: str) -> BaseLLMClient:
+def get_llm_client(provider: str, api_key: Optional[str] = None) -> BaseLLMClient:
     """
     Returns the appropriate LLM client based on settings.
 
     Falls back to HeuristicLLMClient whenever:
     - provider is "heuristic"
-    - api_key is empty / None
-    - provider SDK is not installed (ImportError)
+    - api_key is empty / None (and no GEMINI_API_KEY environment variable for gemini)
+    - provider SDK is not installed (ImportError / RuntimeError)
     - any construction error occurs
     """
     provider = (provider or "heuristic").strip().lower()
-    api_key  = (api_key  or "").strip()
+    api_key = (api_key or "").strip()
+
+    if provider == "gemini" and not api_key:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
 
     if not api_key or provider == "heuristic":
         return HeuristicLLMClient()
@@ -388,8 +489,8 @@ def get_llm_client(provider: str, api_key: str) -> BaseLLMClient:
         if provider == "groq":
             return GroqLLMClient(api_key)
         if provider == "gemini":
-            return GeminiLLMClient(api_key)
-    except (RuntimeError, Exception) as exc:
+            return GeminiLLMClient(api_key=api_key)
+    except (RuntimeError, ValueError, Exception) as exc:
         logger.warning(
             "Could not initialize LLM provider '%s' (%s). "
             "Falling back to HeuristicLLMClient.",
