@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from backend.models.audit import AuditLog
 from backend.models.exception import ReconciliationException
 from backend.models.reconciliation import ReconciliationResult
 from backend.schemas.ai_controller import AIControllerResult
+from backend.services.fuzzy_matcher import FuzzyMatchEngine, FuzzyMatchResult
 from backend.services.llm_client import (
     BaseLLMClient,
     HeuristicLLMClient,
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 def _collect_evidence(
     result: ReconciliationResult,
     exception: Optional[ReconciliationException] = None,
-    fuzzy_result: Optional[Dict[str, Any]] = None,
+    fuzzy_result: Optional[Union[Dict[str, Any], FuzzyMatchResult]] = None,
 ) -> Dict[str, Any]:
     """
     Gathers all available signals into a flat evidence dictionary.
@@ -80,11 +81,20 @@ def _collect_evidence(
 
     # Phase 7 fuzzy signals (supplementary)
     if fuzzy_result is not None:
+        if isinstance(fuzzy_result, dict):
+            f_dict = fuzzy_result
+        else:
+            f_dict = {
+                "decision": getattr(fuzzy_result, "decision", None),
+                "composite_score": getattr(fuzzy_result, "composite_score", None),
+                "amount_diff": getattr(fuzzy_result, "amount_diff", None),
+                "matched_fields": getattr(fuzzy_result, "matched_fields", None),
+            }
         evidence.update({
-            "fuzzy_decision":         fuzzy_result.get("decision"),
-            "fuzzy_composite_score":  fuzzy_result.get("composite_score"),
-            "fuzzy_amount_diff":      fuzzy_result.get("amount_diff"),
-            "fuzzy_matched_fields":   fuzzy_result.get("matched_fields"),
+            "fuzzy_decision":         f_dict.get("decision"),
+            "fuzzy_composite_score":  f_dict.get("composite_score"),
+            "fuzzy_amount_diff":      f_dict.get("amount_diff"),
+            "fuzzy_matched_fields":   f_dict.get("matched_fields"),
         })
 
     return evidence
@@ -134,13 +144,20 @@ class AIController:
     controller.process_reconciliation_summary(db, summary)
     """
 
-    def __init__(self, client: Optional[BaseLLMClient] = None) -> None:
+    def __init__(
+        self,
+        client: Optional[BaseLLMClient] = None,
+        fuzzy_engine: Optional[FuzzyMatchEngine] = None,
+    ) -> None:
         """
         Parameters
         ----------
         client : BaseLLMClient, optional
             Inject a specific client (useful for testing).
             If None, the factory selects based on settings.
+        fuzzy_engine : FuzzyMatchEngine, optional
+            Inject a specific FuzzyMatchEngine instance (useful for testing/reuse).
+            If None, a default FuzzyMatchEngine is created.
         """
         if client is not None:
             self._client = client
@@ -154,6 +171,12 @@ class AIController:
                 provider=settings.LLM_PROVIDER,
                 api_key=api_key,
             )
+        self._fuzzy_engine = fuzzy_engine or FuzzyMatchEngine()
+
+    @property
+    def fuzzy_engine(self) -> FuzzyMatchEngine:
+        """Expose the fuzzy match engine instance."""
+        return self._fuzzy_engine
 
     # ------------------------------------------------------------------
     # Core investigation method
@@ -163,7 +186,7 @@ class AIController:
         self,
         result: ReconciliationResult,
         exception: Optional[ReconciliationException] = None,
-        fuzzy_result: Optional[Dict[str, Any]] = None,
+        fuzzy_result: Optional[Union[Dict[str, Any], FuzzyMatchResult]] = None,
     ) -> AIControllerResult:
         """
         Investigates a reconciliation result and returns a validated
@@ -215,6 +238,49 @@ class AIController:
             )
 
         return ai_result
+
+    # ------------------------------------------------------------------
+    # Fuzzy-assisted investigation bridge
+    # ------------------------------------------------------------------
+
+    def investigate_with_fuzzy(
+        self,
+        result: ReconciliationResult,
+        exception: Optional[ReconciliationException] = None,
+        gateway_txn: Optional[Any] = None,
+        bank_txn: Optional[Any] = None,
+        candidate_banks: Optional[List[Any]] = None,
+        fuzzy_result: Optional[Union[Dict[str, Any], FuzzyMatchResult]] = None,
+    ) -> AIControllerResult:
+        """
+        Investigates a discrepancy by first leveraging FuzzyMatchEngine (Phase 7)
+        and passing the resulting FuzzyMatchResult into the AI investigation method.
+
+        Safety boundaries:
+        - Exact deterministic matches (AUTO_RECONCILED) truly bypass both FuzzyMatchEngine and AI/LLM.
+        - Advisory only — does not resolve exceptions or change financial balances.
+        """
+        # Exact deterministic matches bypass both fuzzy matching and AI/LLM
+        if getattr(result, "final_decision", "") == "AUTO_RECONCILED":
+            return AIControllerResult(
+                recommendation="AUTO_RECONCILE",
+                confidence=1.0,
+                reason=(
+                    "Phase 6 deterministic engine confirmed AUTO_RECONCILED "
+                    "with 100% match score. No further investigation required."
+                ),
+                risk="LOW",
+            )
+
+        fuzz = fuzzy_result
+        if fuzz is None:
+            if gateway_txn is not None and bank_txn is not None:
+                fuzz = self._fuzzy_engine.score_pair(gateway_txn, bank_txn)
+            elif gateway_txn is not None and candidate_banks is not None:
+                best_matches = self._fuzzy_engine.find_best_candidates([gateway_txn], candidate_banks)
+                fuzz = best_matches[0] if best_matches else None
+
+        return self.investigate(result, exception=exception, fuzzy_result=fuzz)
 
     # ------------------------------------------------------------------
     # Persist to DB
