@@ -286,25 +286,27 @@ class AIController:
     # Persist to DB
     # ------------------------------------------------------------------
 
-    def investigate_and_persist(
+    def persist_result(
         self,
         db: Session,
         result: ReconciliationResult,
+        ai_result: AIControllerResult,
         exception: Optional[ReconciliationException] = None,
-        fuzzy_result: Optional[Dict[str, Any]] = None,
+        fuzzy_result: Optional[Union[Dict[str, Any], FuzzyMatchResult]] = None,
     ) -> AIControllerResult:
         """
-        Investigates the result, writes AI fields to the DB, and appends
-        an AuditLog entry.  Does NOT commit — caller controls the transaction.
+        Persists an already-computed AIControllerResult without calling the LLM
+        or running an investigation again. Writes AI fields to the DB and appends
+        an AuditLog entry. Does NOT commit — caller controls the transaction.
 
         Safety rules enforced here:
+        - Does NOT call self.investigate() or the LLM.
         - is_resolved is never set to True by Phase 8.
         - ReconciliationException.status is never set to APPROVED/RESOLVED.
+        - Financial amounts and balances remain unchanged.
+        - Advisory only.
         """
-        ai_result = self.investigate(result, exception, fuzzy_result)
-
         # Determine matching_method label
-        client_name = type(self._client).__name__
         if isinstance(self._client, HeuristicLLMClient):
             method_label = "HEURISTIC_FALLBACK"
         else:
@@ -337,6 +339,24 @@ class AIController:
         db.add(audit)
 
         return ai_result
+
+    def investigate_and_persist(
+        self,
+        db: Session,
+        result: ReconciliationResult,
+        exception: Optional[ReconciliationException] = None,
+        fuzzy_result: Optional[Dict[str, Any]] = None,
+    ) -> AIControllerResult:
+        """
+        Investigates the result, writes AI fields to the DB, and appends
+        an AuditLog entry.  Does NOT commit — caller controls the transaction.
+
+        Safety rules enforced here:
+        - is_resolved is never set to True by Phase 8.
+        - ReconciliationException.status is never set to APPROVED/RESOLVED.
+        """
+        ai_result = self.investigate(result, exception, fuzzy_result)
+        return self.persist_result(db, result, ai_result, exception, fuzzy_result)
 
     # ------------------------------------------------------------------
     # Batch processing (consumes Phase 6 summary dict directly)

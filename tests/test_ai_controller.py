@@ -803,6 +803,131 @@ class TestPersistence:
         res = db_session.query(ReconciliationResult).filter_by(reconciliation_id="TEST_AI_PERSIST_2").first()
         assert res.matching_method == "AI_REASONING"
 
+    def test_persist_result_writes_supplied_result_and_skips_llm(self, db_session):
+        """persist_result writes the supplied AIControllerResult directly to DB without calling the LLM."""
+        fake_client = FakeLLMClient()
+        controller = AIController(client=fake_client)
+        result = make_test_result(
+            recon_id="TEST_AI_PERSIST_PRE_1",
+            gw_id="TEST_AI_GW_PRE_1",
+            final_decision="HUMAN_REVIEW",
+            discrepancy_amount=250.0,
+            is_resolved=False,
+        )
+        exception = make_test_exception(
+            exc_id="TEST_AI_EXC_PRE_1",
+            recon_id="TEST_AI_PERSIST_PRE_1",
+            category="AMOUNT_MISMATCH",
+            severity="MEDIUM",
+            diff_amount=250.0,
+            status="OPEN",
+        )
+        db_session.add(result)
+        db_session.add(exception)
+        db_session.commit()
+
+        precomputed_ai = AIControllerResult(
+            recommendation="REVIEW",
+            confidence=0.92,
+            reason="Precomputed advisory reasoning for persistence test.",
+            risk="LOW",
+        )
+
+        persisted_res = controller.persist_result(
+            db_session,
+            result,
+            precomputed_ai,
+            exception=exception,
+        )
+        db_session.commit()
+
+        # 1. Zero LLM calls made
+        assert fake_client.call_count == 0
+
+        # 2. Correct advisory AI fields written
+        assert persisted_res is precomputed_ai
+        res = db_session.query(ReconciliationResult).filter_by(reconciliation_id="TEST_AI_PERSIST_PRE_1").first()
+        assert res.ai_recommendation == "REVIEW"
+        assert res.ai_confidence == 92.0
+        assert res.ai_reasoning == "Precomputed advisory reasoning for persistence test."
+        assert res.matching_method == "AI_REASONING"
+
+        # 3. Exception explanation updated
+        exc = db_session.query(ReconciliationException).filter_by(exception_id="TEST_AI_EXC_PRE_1").first()
+        assert exc.ai_explanation == "Precomputed advisory reasoning for persistence test."
+
+        # 4. AuditLog created
+        audit = db_session.query(AuditLog).filter_by(entity_id="TEST_AI_PERSIST_PRE_1").first()
+        assert audit is not None
+        assert audit.actor == "AI_CONTROLLER"
+        assert audit.action == "AI_REASONED"
+        assert audit.new_value == "REVIEW"
+
+        # 5. Safety invariants: Exception remains OPEN, is_resolved remains False, financial values unchanged
+        assert exc.status == "OPEN"
+        assert res.is_resolved is False
+        assert res.final_decision == "HUMAN_REVIEW"
+        assert res.discrepancy_amount == 250.0
+        assert exc.difference_amount == 250.0
+
+    def test_persist_result_with_heuristic_client_method_label(self, db_session):
+        """persist_result assigns 'HEURISTIC_FALLBACK' when HeuristicLLMClient is used."""
+        controller = AIController(client=HeuristicLLMClient())
+        result = make_test_result(recon_id="TEST_AI_PERSIST_HEUR_1")
+        db_session.add(result)
+        db_session.commit()
+
+        precomputed = AIControllerResult(
+            recommendation="AUTO_RECONCILE",
+            confidence=0.95,
+            reason="Heuristic precomputed reason.",
+            risk="LOW",
+        )
+        controller.persist_result(db_session, result, precomputed)
+        db_session.commit()
+
+        res = db_session.query(ReconciliationResult).filter_by(reconciliation_id="TEST_AI_PERSIST_HEUR_1").first()
+        assert res.matching_method == "HEURISTIC_FALLBACK"
+        assert res.ai_recommendation == "AUTO_RECONCILE"
+
+    def test_persist_result_chained_with_investigate_with_fuzzy(self, db_session):
+        """investigate_with_fuzzy followed by persist_result causes exactly ONE LLM call."""
+        fake_client = FakeLLMClient(response_dict={
+            "recommendation": "AUTO_RECONCILE",
+            "confidence": 0.89,
+            "reason": "Fuzzy and AI matched cleanly.",
+            "risk": "LOW",
+        })
+        controller = AIController(client=fake_client)
+
+        result = make_test_result(
+            recon_id="TEST_AI_FUZZ_PERSIST_1",
+            final_decision="HUMAN_REVIEW",
+            discrepancy_amount=0.0,
+            is_resolved=False,
+        )
+        exception = make_test_exception(
+            exc_id="TEST_AI_FUZZ_EXC_1",
+            recon_id="TEST_AI_FUZZ_PERSIST_1",
+            status="OPEN",
+        )
+        db_session.add(result)
+        db_session.add(exception)
+        db_session.commit()
+
+        # Phase 7 + Phase 8 investigation
+        ai_result = controller.investigate_with_fuzzy(result, exception=exception)
+        assert fake_client.call_count == 1
+
+        # Persistence step: should NOT invoke LLM again
+        controller.persist_result(db_session, result, ai_result, exception=exception)
+        db_session.commit()
+        assert fake_client.call_count == 1  # Still 1!
+
+        reloaded = db_session.query(ReconciliationResult).filter_by(reconciliation_id="TEST_AI_FUZZ_PERSIST_1").first()
+        assert reloaded.ai_recommendation == "AUTO_RECONCILE"
+        assert reloaded.is_resolved is False  # Advisory only!
+
 
 # ===========================================================================
 # H. Batch Processing Tests (process_reconciliation_summary)
