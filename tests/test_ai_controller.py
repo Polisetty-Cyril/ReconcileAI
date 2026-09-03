@@ -480,8 +480,10 @@ class TestProviderFactory:
         client2 = get_llm_client("HEURISTIC", "any_key")
         assert isinstance(client2, HeuristicLLMClient)
 
-    def test_get_llm_client_empty_api_key_falls_back(self):
+    def test_get_llm_client_empty_api_key_falls_back(self, monkeypatch):
         """Empty or None API keys always fall back to HeuristicLLMClient."""
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
         assert isinstance(get_llm_client("openai", ""), HeuristicLLMClient)
         assert isinstance(get_llm_client("openai", None), HeuristicLLMClient)
         assert isinstance(get_llm_client("groq", "   "), HeuristicLLMClient)
