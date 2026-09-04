@@ -1005,5 +1005,81 @@ class TestInteractiveDemoWorkflow:
         assert "blockchain" not in demo_code.lower()
 
 
+# =============================================================================
+# 7. Phase 16 Export & Reporting Dashboard Verification
+# =============================================================================
 
+class TestPhase16DashboardExports:
+    """Verifies Phase 16 Export controls, Reports & Exports view, and safety invariants."""
 
+    @pytest.fixture
+    def app_source(self):
+        with open("dashboard/app.py", "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_reports_navigation_view_exists(self, app_source):
+        """Verifies that 📑 Reports & Exports is in the navigation radio and has a dedicated branch."""
+        assert '"📑 Reports & Exports"' in app_source
+        assert 'elif nav_selection == "📑 Reports & Exports":' in app_source
+
+    def test_export_controls_in_existing_views(self, app_source):
+        """Verifies Quick Export controls and download buttons exist in existing views."""
+        # Exception Workbench
+        exc_start = app_source.index('elif nav_selection == "⚖️ Exception Workbench":')
+        exc_code = app_source[exc_start:app_source.index('elif nav_selection == "🔍 Transaction Explorer":')]
+        assert "Quick Export Exception Queue" in exc_code
+        assert "btn_dl_exc_csv" in exc_code
+        assert "btn_dl_exc_xlsx" in exc_code
+        assert "btn_dl_exc_json" in exc_code
+
+        # Transaction Explorer
+        txn_start = app_source.index('elif nav_selection == "🔍 Transaction Explorer":')
+        txn_code = app_source[txn_start:app_source.index('elif nav_selection == "📑 Reconciliation Results":')]
+        assert "Quick Export Transactions" in txn_code
+        assert "btn_dl_txn_csv" in txn_code
+        assert "btn_dl_txn_xlsx" in txn_code
+
+        # Reconciliation Results
+        recon_start = app_source.index('elif nav_selection == "📑 Reconciliation Results":')
+        recon_code = app_source[recon_start:app_source.index('elif nav_selection == "📜 Immutable Audit Trail":')]
+        assert "Quick Export Reconciliation Clusters" in recon_code
+        assert "btn_dl_recon_csv" in recon_code
+        assert "btn_dl_recon_xlsx" in recon_code
+
+        # Audit Trail
+        audit_start = app_source.index('elif nav_selection == "📜 Immutable Audit Trail":')
+        audit_code = app_source[audit_start:app_source.index('elif nav_selection == "📑 Reports & Exports":')]
+        assert "Quick Export Audit Trail" in audit_code
+        assert "btn_dl_audit_csv" in audit_code
+        assert "btn_dl_audit_xlsx" in audit_code
+        assert "btn_dl_audit_json" in audit_code
+
+    def test_reports_tabs_and_sections(self, app_source):
+        """Verifies that the Reports & Exports hub contains all 5 required sections/tabs."""
+        reports_start = app_source.index('elif nav_selection == "📑 Reports & Exports":')
+        reports_code = app_source[reports_start:app_source.index('elif nav_selection == "⚙️ Operations & Controls":')]
+
+        # 5 Tabs
+        assert "📊 Executive Summary" in reports_code
+        assert "⚖️ Discrepancy & SLA Aging" in reports_code
+        assert "📑 Three-Leg Reconciliation" in reports_code
+        assert "📜 Audit Compliance" in reports_code
+        assert "🧪 Benchmark Evaluation" in reports_code
+
+        # Key elements within tabs
+        assert "reconcileai_executive_report.xlsx" in reports_code
+        assert "reconcileai_sla_aging_report.csv" in reports_code
+        assert "reconcileai_three_leg_reconciliation.csv" in reports_code
+        assert "reconcileai_audit_compliance.csv" in reports_code
+        assert "reconcileai_benchmark_" in reports_code
+
+    def test_dashboard_strict_api_only_preserved(self, app_source):
+        """CRITICAL: Confirms dashboard remains strictly API-only with zero DB/ORM/engine imports."""
+        assert "from sqlalchemy" not in app_source
+        assert "import sqlalchemy" not in app_source
+        assert "backend.models" not in app_source
+        assert "SessionLocal" not in app_source
+        assert "DeterministicReconciliationEngine" not in app_source
+        assert "FinanceController" not in app_source
+        assert "AuditService" not in app_source
+        assert "ReportingService" not in app_source

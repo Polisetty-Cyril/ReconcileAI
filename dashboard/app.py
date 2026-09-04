@@ -37,6 +37,25 @@ except ImportError:
         APIClientError,
     )
 
+# Ensure both direct and package imports work for export_utils
+try:
+    from dashboard.export_utils import (
+        dataframe_to_csv_bytes,
+        dataframe_to_excel_bytes,
+        dataframes_to_excel_bytes,
+        dict_to_json_bytes,
+        text_to_bytes,
+    )
+except ImportError:
+    from export_utils import (
+        dataframe_to_csv_bytes,
+        dataframe_to_excel_bytes,
+        dataframes_to_excel_bytes,
+        dict_to_json_bytes,
+        text_to_bytes,
+    )
+
+
 # -----------------------------------------------------------------------------
 # 1. Streamlit Application & Page Configuration
 # -----------------------------------------------------------------------------
@@ -269,6 +288,7 @@ nav_selection = st.sidebar.radio(
         "🔍 Transaction Explorer",
         "📑 Reconciliation Results",
         "📜 Immutable Audit Trail",
+        "📑 Reports & Exports",
         "⚙️ Operations & Controls",
         "🎬 5-Minute Demo"
     ],
@@ -687,6 +707,81 @@ elif nav_selection == "⚖️ Exception Workbench":
         queue_df = pd.DataFrame(queue_rows)
         st.dataframe(queue_df, use_container_width=True, hide_index=True)
 
+        # Quick Export Controls
+        st.markdown("##### 📥 **Quick Export Exception Queue**")
+        exp_col1, exp_col2 = st.columns([2, 4])
+        with exp_col1:
+            exc_exp_scope = st.radio(
+                "Export Scope",
+                options=[f"Current View ({len(queue_df)} items)", f"All Filtered Records ({total_exc} items)"],
+                key="exc_exp_scope_radio",
+                horizontal=True
+            )
+
+        if "All Filtered" in exc_exp_scope and total_exc > len(queue_df):
+            try:
+                all_exc_resp = client.get_exception_aging_report(
+                    status=status_filter if status_filter != "ALL" else None,
+                    severity=severity_filter if severity_filter != "ALL" else None,
+                    category=category_filter if category_filter != "ALL" else None,
+                    sla_status=sla_filter if sla_filter != "ALL" else None,
+                )
+                all_exc_items = all_exc_resp.get("items", [])
+                exp_rows = [
+                    {
+                        "Exception ID": e.get("exception_id"),
+                        "Category": e.get("category", "").replace("_", " ").title(),
+                        "Severity": e.get("severity"),
+                        "Difference (INR)": e.get("difference_amount", 0.0),
+                        "Status": e.get("status"),
+                        "SLA Status": e.get("sla_status", "OK"),
+                        "Escalation Level": e.get("escalation_level", 0),
+                        "Created At": e.get("created_at", ""),
+                        "SLA Deadline": e.get("sla_deadline", ""),
+                        "Reviewer Notes": e.get("reviewer_notes", ""),
+                    }
+                    for e in all_exc_items
+                ]
+                exp_df = pd.DataFrame(exp_rows) if exp_rows else queue_df
+                exp_json_data = all_exc_items
+            except Exception:
+                exp_df = queue_df
+                exp_json_data = exceptions
+        else:
+            exp_df = queue_df
+            exp_json_data = exceptions
+
+        with exp_col2:
+            st.write("")
+            btn_c1, btn_c2, btn_c3 = st.columns(3)
+            with btn_c1:
+                st.download_button(
+                    "📥 CSV",
+                    data=dataframe_to_csv_bytes(exp_df),
+                    file_name="reconcileai_exceptions.csv",
+                    mime="text/csv",
+                    key="btn_dl_exc_csv",
+                    use_container_width=True
+                )
+            with btn_c2:
+                st.download_button(
+                    "📥 Excel",
+                    data=dataframe_to_excel_bytes(exp_df, sheet_name="Exceptions"),
+                    file_name="reconcileai_exceptions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_exc_xlsx",
+                    use_container_width=True
+                )
+            with btn_c3:
+                st.download_button(
+                    "📥 JSON",
+                    data=dict_to_json_bytes(exp_json_data),
+                    file_name="reconcileai_exceptions.json",
+                    mime="application/json",
+                    key="btn_dl_exc_json",
+                    use_container_width=True
+                )
+
         st.divider()
 
         # 3. Exception Selection & Deep-Dive Investigation
@@ -1000,6 +1095,68 @@ elif nav_selection == "🔍 Transaction Explorer":
         df_txns = pd.DataFrame(table_rows)
         st.dataframe(df_txns, use_container_width=True, hide_index=True)
 
+        # Quick Export Controls
+        st.markdown("##### 📥 **Quick Export Transactions**")
+        exp_col1, exp_col2 = st.columns([2, 4])
+        with exp_col1:
+            txn_exp_scope = st.radio(
+                "Export Scope",
+                options=[f"Current Page ({len(df_txns)} items)", f"All Filtered Records ({total_txns:,} items)"],
+                key="txn_exp_scope_radio",
+                horizontal=True
+            )
+
+        if "All Filtered" in txn_exp_scope and total_txns > len(df_txns):
+            try:
+                all_txns_resp = client.get_all_transactions(
+                    source=None if source_val == "ALL" else source_val,
+                    status=None if status_val == "ALL" else status_val,
+                    start_date=start_date_str,
+                    end_date=end_date_str
+                )
+                all_txns_items = all_txns_resp.get("items", [])
+                exp_txn_rows = [
+                    {
+                        "Transaction ID": t.get("transaction_id"),
+                        "Source": t.get("source"),
+                        "Amount": t.get("amount", 0.0),
+                        "Currency": t.get("currency", "INR"),
+                        "Status": t.get("status"),
+                        "Reference ID": t.get("reference_id") or "",
+                        "Order ID": t.get("order_id") or "",
+                        "Transaction Date": t.get("transaction_date", ""),
+                        "Created At": t.get("created_at", ""),
+                    }
+                    for t in all_txns_items
+                ]
+                exp_df_txn = pd.DataFrame(exp_txn_rows) if exp_txn_rows else df_txns
+            except Exception:
+                exp_df_txn = df_txns
+        else:
+            exp_df_txn = df_txns
+
+        with exp_col2:
+            st.write("")
+            btn_t1, btn_t2 = st.columns(2)
+            with btn_t1:
+                st.download_button(
+                    "📥 CSV",
+                    data=dataframe_to_csv_bytes(exp_df_txn),
+                    file_name="reconcileai_transactions.csv",
+                    mime="text/csv",
+                    key="btn_dl_txn_csv",
+                    use_container_width=True
+                )
+            with btn_t2:
+                st.download_button(
+                    "📥 Excel",
+                    data=dataframe_to_excel_bytes(exp_df_txn, sheet_name="Transactions"),
+                    file_name="reconcileai_transactions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_txn_xlsx",
+                    use_container_width=True
+                )
+
         st.divider()
 
         # 6. Transaction Detail Inspector
@@ -1159,6 +1316,70 @@ elif nav_selection == "📑 Reconciliation Results":
             })
         df_recon = pd.DataFrame(table_rows)
         st.dataframe(df_recon, use_container_width=True, hide_index=True)
+
+        # Quick Export Controls
+        st.markdown("##### 📥 **Quick Export Reconciliation Clusters**")
+        exp_col1, exp_col2 = st.columns([2, 4])
+        with exp_col1:
+            recon_exp_scope = st.radio(
+                "Export Scope",
+                options=[f"Current Page ({len(df_recon)} items)", f"All Filtered Records ({total_results:,} items)"],
+                key="recon_exp_scope_radio",
+                horizontal=True
+            )
+
+        if "All Filtered" in recon_exp_scope and total_results > len(df_recon):
+            try:
+                all_recon_resp = client.get_reconciliation_report(
+                    final_decision=filter_decision,
+                    is_resolved=filter_resolved,
+                    reconciliation_id=filter_recon_id
+                )
+                all_recon_items = all_recon_resp.get("items", [])
+                exp_recon_rows = [
+                    {
+                        "Reconciliation ID": r.get("reconciliation_id"),
+                        "Final Decision": r.get("final_decision"),
+                        "Resolution": "Resolved" if r.get("is_resolved") else "Unresolved",
+                        "Matching Method": r.get("matching_method", ""),
+                        "Match Score": r.get("match_score", 0.0),
+                        "Discrepancy (INR)": r.get("discrepancy_amount", 0.0),
+                        "Gateway Leg": r.get("gateway_transaction_id") or "",
+                        "Bank Leg": r.get("bank_transaction_id") or "",
+                        "ERP Leg": r.get("erp_invoice_id") or "",
+                        "AI Recommendation": r.get("ai_recommendation") or "",
+                        "AI Confidence": r.get("ai_confidence") or 0.0,
+                        "Reconciled At": r.get("reconciled_at", "")
+                    }
+                    for r in all_recon_items
+                ]
+                exp_df_recon = pd.DataFrame(exp_recon_rows) if exp_recon_rows else df_recon
+            except Exception:
+                exp_df_recon = df_recon
+        else:
+            exp_df_recon = df_recon
+
+        with exp_col2:
+            st.write("")
+            btn_r1, btn_r2 = st.columns(2)
+            with btn_r1:
+                st.download_button(
+                    "📥 CSV",
+                    data=dataframe_to_csv_bytes(exp_df_recon),
+                    file_name="reconcileai_reconciliation_results.csv",
+                    mime="text/csv",
+                    key="btn_dl_recon_csv",
+                    use_container_width=True
+                )
+            with btn_r2:
+                st.download_button(
+                    "📥 Excel",
+                    data=dataframe_to_excel_bytes(exp_df_recon, sheet_name="ReconciliationResults"),
+                    file_name="reconcileai_reconciliation_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_recon_xlsx",
+                    use_container_width=True
+                )
 
         st.divider()
 
@@ -1406,6 +1627,80 @@ elif nav_selection == "📜 Immutable Audit Trail":
         df_audit = pd.DataFrame(table_rows)
         st.dataframe(df_audit, use_container_width=True, hide_index=True)
 
+        # Quick Export Controls
+        st.markdown("##### 📥 **Quick Export Audit Trail**")
+        st.caption("🔒 Immutable append-only audit trail export (strictly read-only).")
+        exp_col1, exp_col2 = st.columns([2, 4])
+        with exp_col1:
+            audit_exp_scope = st.radio(
+                "Export Scope",
+                options=[f"Current Page ({len(df_audit)} items)", f"All Filtered Records ({total_audit:,} items)"],
+                key="audit_exp_scope_radio",
+                horizontal=True
+            )
+
+        if "All Filtered" in audit_exp_scope and total_audit > len(df_audit):
+            try:
+                all_audit_resp = client.get_audit_compliance_report(
+                    entity=filter_entity,
+                    entity_id=filter_entity_id,
+                    action=filter_action
+                )
+                all_audit_items = all_audit_resp.get("items", [])
+                exp_audit_rows = [
+                    {
+                        "Audit ID": a.get("audit_id"),
+                        "Timestamp": a.get("timestamp", ""),
+                        "Actor": a.get("actor"),
+                        "Action": a.get("action"),
+                        "Entity": a.get("entity"),
+                        "Entity ID": a.get("entity_id"),
+                        "Old Value": a.get("old_value") or "",
+                        "New Value": a.get("new_value") or "",
+                        "Reason / Context": a.get("reason") or "",
+                    }
+                    for a in all_audit_items
+                ]
+                exp_df_audit = pd.DataFrame(exp_audit_rows) if exp_audit_rows else df_audit
+                exp_audit_json = all_audit_items
+            except Exception:
+                exp_df_audit = df_audit
+                exp_audit_json = audit_records
+        else:
+            exp_df_audit = df_audit
+            exp_audit_json = audit_records
+
+        with exp_col2:
+            st.write("")
+            btn_a1, btn_a2, btn_a3 = st.columns(3)
+            with btn_a1:
+                st.download_button(
+                    "📥 CSV",
+                    data=dataframe_to_csv_bytes(exp_df_audit),
+                    file_name="reconcileai_audit_trail.csv",
+                    mime="text/csv",
+                    key="btn_dl_audit_csv",
+                    use_container_width=True
+                )
+            with btn_a2:
+                st.download_button(
+                    "📥 Excel",
+                    data=dataframe_to_excel_bytes(exp_df_audit, sheet_name="AuditTrail"),
+                    file_name="reconcileai_audit_trail.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_audit_xlsx",
+                    use_container_width=True
+                )
+            with btn_a3:
+                st.download_button(
+                    "📥 JSON",
+                    data=dict_to_json_bytes(exp_audit_json),
+                    file_name="reconcileai_audit_trail.json",
+                    mime="application/json",
+                    key="btn_dl_audit_json",
+                    use_container_width=True
+                )
+
         st.divider()
 
         # 6. Read-Only Forensic Detail Inspector
@@ -1461,6 +1756,504 @@ elif nav_selection == "📜 Immutable Audit Trail":
 
                 _render_evidence("State Before Transition (old_value):", selected_rec.get("old_value"))
                 _render_evidence("State After Transition (new_value):", selected_rec.get("new_value"))
+
+elif nav_selection == "📑 Reports & Exports":
+    # -------------------------------------------------------------------------
+    # Section: Reports & Exports Hub (Phase 16)
+    # -------------------------------------------------------------------------
+    st.markdown("### **📑 Financial Reports & Compliance Export Hub**")
+    st.caption(
+        "Generate, analyze, and export executive statements, three-leg settlement ledgers, "
+        "SLA aging profiles, regulatory compliance audits, and benchmark evaluation baselines."
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    report_tab1, report_tab2, report_tab3, report_tab4, report_tab5 = st.tabs([
+        "📊 Executive Summary",
+        "⚖️ Discrepancy & SLA Aging",
+        "📑 Three-Leg Reconciliation",
+        "📜 Audit Compliance",
+        "🧪 Benchmark Evaluation"
+    ])
+
+    # -------------------------------------------------------------------------
+    # Tab 1: Executive Reconciliation Summary
+    # -------------------------------------------------------------------------
+    with report_tab1:
+        st.markdown("#### **Executive Financial Reconciliation Statement**")
+        st.caption("Consolidated macro KPIs, breakages, settlement status, and risk exposure aggregated from canonical database records.")
+
+        try:
+            exec_data = client.get_executive_report()
+        except APIClientError as e:
+            st.error(f"Failed to fetch executive report: {e}")
+            exec_data = {}
+
+        if exec_data:
+            # Top KPI metrics
+            ek_c1, ek_c2, ek_c3, ek_c4, ek_c5, ek_c6 = st.columns(6)
+            with ek_c1:
+                st.metric("Total Transactions", f"{exec_data.get('total_transactions', 0):,}")
+            with ek_c2:
+                st.metric("Total Volume", format_inr(exec_data.get("total_transaction_value_inr", 0.0)))
+            with ek_c3:
+                st.metric("Reconciliation Clusters", f"{exec_data.get('total_reconciliation_results', 0):,}")
+            with ek_c4:
+                st.metric("Auto-Match Rate", f"{exec_data.get('auto_reconciliation_rate', 0.0):.1f}%")
+            with ek_c5:
+                st.metric("Open Exceptions", f"{exec_data.get('open_exceptions', 0):,}")
+            with ek_c6:
+                st.metric("Value-at-Risk", format_inr(exec_data.get("unresolved_amount_inr", 0.0)))
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Breakdown Tables
+            b_c1, b_c2 = st.columns(2)
+            with b_c1:
+                st.markdown("##### **Exception Severity Breakdown**")
+                sev_data = exec_data.get("exceptions_by_severity", {})
+                df_sev = pd.DataFrame([{"Severity": k, "Count": v} for k, v in sev_data.items()]) if sev_data else pd.DataFrame(columns=["Severity", "Count"])
+                st.dataframe(df_sev, use_container_width=True, hide_index=True)
+
+                st.markdown("##### **SLA Urgency Distribution**")
+                sla_data = exec_data.get("sla_status_breakdown", {})
+                df_sla = pd.DataFrame([{"SLA Status": k, "Count": v} for k, v in sla_data.items()]) if sla_data else pd.DataFrame(columns=["SLA Status", "Count"])
+                st.dataframe(df_sla, use_container_width=True, hide_index=True)
+
+            with b_c2:
+                st.markdown("##### **Reconciliation Decisions Breakdown**")
+                dec_data = exec_data.get("decision_breakdown", {})
+                df_dec = pd.DataFrame([{"Decision": k, "Count": v} for k, v in dec_data.items()]) if dec_data else pd.DataFrame(columns=["Decision", "Count"])
+                st.dataframe(df_dec, use_container_width=True, hide_index=True)
+
+                st.markdown("##### **Exception Category Breakdown**")
+                cat_data = exec_data.get("exceptions_by_category", {})
+                df_cat = pd.DataFrame([{"Category": k.replace("_", " ").title(), "Count": v} for k, v in cat_data.items()]) if cat_data else pd.DataFrame(columns=["Category", "Count"])
+                st.dataframe(df_cat, use_container_width=True, hide_index=True)
+
+            # Summary DataFrame for single sheet
+            df_exec_summary = pd.DataFrame([
+                {"Metric": "Total Ingested Transactions", "Value": str(exec_data.get("total_transactions", 0))},
+                {"Metric": "Total Ingested Volume (INR)", "Value": str(exec_data.get("total_transaction_value_inr", 0.0))},
+                {"Metric": "Total Reconciliation Clusters", "Value": str(exec_data.get("total_reconciliation_results", 0))},
+                {"Metric": "Total Auto-Reconciled", "Value": str(exec_data.get("total_auto_reconciled", 0))},
+                {"Metric": "Auto-Reconciliation Rate (%)", "Value": f"{exec_data.get('auto_reconciliation_rate', 0.0):.2f}%"},
+                {"Metric": "Total Exceptions Recorded", "Value": str(exec_data.get("total_exceptions", 0))},
+                {"Metric": "Open Exceptions", "Value": str(exec_data.get("open_exceptions", 0))},
+                {"Metric": "Approved Exceptions", "Value": str(exec_data.get("approved_exceptions", 0))},
+                {"Metric": "Rejected Exceptions", "Value": str(exec_data.get("rejected_exceptions", 0))},
+                {"Metric": "Unresolved Value-at-Risk (INR)", "Value": str(exec_data.get("unresolved_amount_inr", 0.0))},
+                {"Metric": "Report Generated At (UTC)", "Value": str(exec_data.get("generated_at", ""))},
+            ])
+
+            # Multi-sheet Excel workbook
+            excel_sheets = {
+                "Executive Summary": df_exec_summary,
+                "Severity Breakdown": df_sev,
+                "Category Breakdown": df_cat,
+                "SLA Status": df_sla,
+                "Decisions Breakdown": df_dec,
+            }
+            exec_excel_bytes = dataframes_to_excel_bytes(excel_sheets)
+            exec_csv_bytes = dataframe_to_csv_bytes(df_exec_summary)
+            exec_json_bytes = dict_to_json_bytes(exec_data)
+
+            st.divider()
+            st.markdown("##### 📥 **Download Executive Statement**")
+            dl_c1, dl_c2, dl_c3 = st.columns(3)
+            with dl_c1:
+                st.download_button(
+                    "📥 Multi-Sheet Excel Workbook (.xlsx)",
+                    data=exec_excel_bytes,
+                    file_name="reconcileai_executive_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_exec_xlsx",
+                    use_container_width=True
+                )
+            with dl_c2:
+                st.download_button(
+                    "📥 Summary Metrics (CSV)",
+                    data=exec_csv_bytes,
+                    file_name="reconcileai_executive_summary.csv",
+                    mime="text/csv",
+                    key="btn_dl_exec_csv",
+                    use_container_width=True
+                )
+            with dl_c3:
+                st.download_button(
+                    "📥 Full Structured Metrics (JSON)",
+                    data=exec_json_bytes,
+                    file_name="reconcileai_executive_summary.json",
+                    mime="application/json",
+                    key="btn_dl_exec_json",
+                    use_container_width=True
+                )
+
+    # -------------------------------------------------------------------------
+    # Tab 2: Discrepancy & SLA Aging Report
+    # -------------------------------------------------------------------------
+    with report_tab2:
+        st.markdown("#### **Discrepancy Aging & SLA Compliance Report**")
+        st.caption("Track SLA deadlines, escalation tiers, aging profiles, and reviewer adjudication history across all recorded exceptions.")
+
+        # Filters
+        sa_f1, sa_f2, sa_f3 = st.columns(3)
+        with sa_f1:
+            sa_status = st.selectbox("Filter Status", options=["ALL", "OPEN", "APPROVED", "REJECTED"], index=0, key="sa_status_sel")
+        with sa_f2:
+            sa_sev = st.selectbox("Filter Severity", options=["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"], index=0, key="sa_sev_sel")
+        with sa_f3:
+            sa_sla = st.selectbox("Filter SLA Health", options=["ALL", "BREACHED", "WARNING", "OK"], index=0, key="sa_sla_sel")
+
+        try:
+            aging_resp = client.get_exception_aging_report(
+                status=None if sa_status == "ALL" else sa_status,
+                severity=None if sa_sev == "ALL" else sa_sev,
+                sla_status=None if sa_sla == "ALL" else sa_sla
+            )
+            aging_items = aging_resp.get("items", [])
+        except APIClientError as e:
+            st.error(f"Failed to fetch SLA aging report: {e}")
+            aging_items = []
+
+        aging_rows = []
+        for it in aging_items:
+            aging_rows.append({
+                "Exception ID": it.get("exception_id"),
+                "Category": it.get("category", "").replace("_", " ").title(),
+                "Severity": it.get("severity"),
+                "Difference (INR)": format_inr(it.get("difference_amount", 0.0)),
+                "Status": it.get("status"),
+                "SLA Status": it.get("sla_status", "OK"),
+                "Escalation": format_escalation_level(it.get("escalation_level", 0)),
+                "SLA Deadline": it.get("sla_deadline", "")[:19] if it.get("sla_deadline") else "—",
+                "Created At": it.get("created_at", "")[:19] if it.get("created_at") else "—",
+                "Reviewer": it.get("resolved_by") or "—"
+            })
+        df_aging = pd.DataFrame(aging_rows)
+
+        # Urgency summary
+        st.write(f"Showing **{len(df_aging)}** discrepancy records sorted by urgency triage.")
+        st.dataframe(df_aging, use_container_width=True, hide_index=True)
+
+        # Downloads
+        st.divider()
+        st.markdown("##### 📥 **Download Discrepancy & SLA Report**")
+        adl_c1, adl_c2, adl_c3 = st.columns(3)
+        with adl_c1:
+            st.download_button(
+                "📥 Download CSV",
+                data=dataframe_to_csv_bytes(df_aging),
+                file_name="reconcileai_sla_aging_report.csv",
+                mime="text/csv",
+                key="btn_dl_aging_csv",
+                use_container_width=True
+            )
+        with adl_c2:
+            st.download_button(
+                "📥 Download Excel (.xlsx)",
+                data=dataframe_to_excel_bytes(df_aging, sheet_name="SLA_Aging_Report"),
+                file_name="reconcileai_sla_aging_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_aging_xlsx",
+                use_container_width=True
+            )
+        with adl_c3:
+            st.download_button(
+                "📥 Download JSON",
+                data=dict_to_json_bytes(aging_items),
+                file_name="reconcileai_sla_aging_report.json",
+                mime="application/json",
+                key="btn_dl_aging_json",
+                use_container_width=True
+            )
+
+    # -------------------------------------------------------------------------
+    # Tab 3: Three-Leg Reconciliation Report
+    # -------------------------------------------------------------------------
+    with report_tab3:
+        st.markdown("#### **Three-Leg Reconciliation Ledger**")
+        st.caption("Full reconciliation records across Payment Gateway, Core Banking, and ERP ledgers with matching confidence and AI reasoning.")
+
+        tl_c1, tl_c2 = st.columns(2)
+        with tl_c1:
+            tl_decision = st.selectbox(
+                "Filter Decision",
+                options=["ALL", "AUTO_RECONCILED", "HUMAN_REVIEW", "MANUAL_APPROVED", "MANUAL_REJECTED"],
+                index=0,
+                key="tl_decision_sel"
+            )
+        with tl_c2:
+            tl_res = st.selectbox("Filter Resolution State", options=["ALL", "Resolved", "Unresolved"], index=0, key="tl_res_sel")
+
+        is_res_param = True if tl_res == "Resolved" else (False if tl_res == "Unresolved" else None)
+        try:
+            recon_report_resp = client.get_reconciliation_report(
+                final_decision=None if tl_decision == "ALL" else tl_decision,
+                is_resolved=is_res_param
+            )
+            recon_items = recon_report_resp.get("items", [])
+        except APIClientError as e:
+            st.error(f"Failed to fetch reconciliation report: {e}")
+            recon_items = []
+
+        tl_rows = []
+        for r in recon_items:
+            tl_rows.append({
+                "Reconciliation ID": r.get("reconciliation_id"),
+                "Final Decision": r.get("final_decision"),
+                "Resolution": "Resolved" if r.get("is_resolved") else "Unresolved",
+                "Matching Method": r.get("matching_method", ""),
+                "Match Score": f"{r.get('match_score', 0.0):.1f}",
+                "Discrepancy (INR)": format_inr(r.get("discrepancy_amount", 0.0)),
+                "Gateway Txn ID": r.get("gateway_transaction_id") or "—",
+                "Bank Txn ID": r.get("bank_transaction_id") or "—",
+                "ERP Invoice ID": r.get("erp_invoice_id") or "—",
+                "AI Recommendation": r.get("ai_recommendation") or "—",
+                "AI Confidence": f"{r.get('ai_confidence', 0.0):.1f}%" if r.get("ai_confidence") is not None else "—",
+                "Reconciled At": r.get("reconciled_at", "")[:19] if r.get("reconciled_at") else "—"
+            })
+        df_three_leg = pd.DataFrame(tl_rows)
+
+        st.write(f"Showing **{len(df_three_leg)}** candidate cluster records.")
+        st.dataframe(df_three_leg, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("##### 📥 **Download Three-Leg Reconciliation Ledger**")
+        tldl_c1, tldl_c2 = st.columns(2)
+        with tldl_c1:
+            st.download_button(
+                "📥 Download CSV",
+                data=dataframe_to_csv_bytes(df_three_leg),
+                file_name="reconcileai_three_leg_reconciliation.csv",
+                mime="text/csv",
+                key="btn_dl_tl_csv",
+                use_container_width=True
+            )
+        with tldl_c2:
+            st.download_button(
+                "📥 Download Excel (.xlsx)",
+                data=dataframe_to_excel_bytes(df_three_leg, sheet_name="ThreeLegReconciliation"),
+                file_name="reconcileai_three_leg_reconciliation.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_tl_xlsx",
+                use_container_width=True
+            )
+
+    # -------------------------------------------------------------------------
+    # Tab 4: Audit Compliance Export
+    # -------------------------------------------------------------------------
+    with report_tab4:
+        st.markdown("#### **Regulatory Audit Compliance Ledger**")
+        st.caption("Immutable chronological record of all ingestions, reconciliations, AI reasonings, and human adjudications.")
+        st.markdown("""
+        <div style="background-color:#F0FDF4; border:1px solid #BBF7D0; border-left:4px solid #16A34A; border-radius:6px; padding:0.6rem 0.9rem; margin-bottom:1rem; font-size:0.85rem; color:#166534;">
+            🔒 <strong>Immutable Financial Control Record</strong>: This export contains read-only, tamper-evident audit logs. Audit log entries are strictly append-only.
+        </div>
+        """, unsafe_allow_html=True)
+
+        ac_c1, ac_c2 = st.columns(2)
+        with ac_c1:
+            ac_entity = st.selectbox("Entity Scope", options=["ALL", "RECONCILIATION", "EXCEPTION", "WEBHOOK", "TRANSACTION"], index=0, key="ac_entity_sel")
+        with ac_c2:
+            ac_action = st.selectbox("Action Category", options=["ALL", "RECONCILIATION_COMPLETED", "EXCEPTION_CREATED", "EXCEPTION_APPROVED", "EXCEPTION_REJECTED", "WEBHOOK_RECEIVED", "WEBHOOK_SIGNATURE_FAILED"], index=0, key="ac_action_sel")
+
+        try:
+            audit_report_resp = client.get_audit_compliance_report(
+                entity=None if ac_entity == "ALL" else ac_entity,
+                action=None if ac_action == "ALL" else ac_action
+            )
+            audit_report_items = audit_report_resp.get("items", [])
+        except APIClientError as e:
+            st.error(f"Failed to fetch audit report: {e}")
+            audit_report_items = []
+
+        audit_rows = []
+        for a in audit_report_items:
+            audit_rows.append({
+                "Audit ID": a.get("audit_id"),
+                "Timestamp": a.get("timestamp", "")[:19] if a.get("timestamp") else "—",
+                "Actor": a.get("actor"),
+                "Action": a.get("action"),
+                "Entity": a.get("entity"),
+                "Entity ID": a.get("entity_id"),
+                "Old Value": a.get("old_value") or "—",
+                "New Value": a.get("new_value") or "—",
+                "Reason / Context": a.get("reason") or "—"
+            })
+        df_audit_comp = pd.DataFrame(audit_rows)
+
+        st.write(f"Showing **{len(df_audit_comp)}** immutable compliance audit entries.")
+        st.dataframe(df_audit_comp, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("##### 📥 **Download Compliance Audit Trail**")
+        acdl_c1, acdl_c2, acdl_c3 = st.columns(3)
+        with acdl_c1:
+            st.download_button(
+                "📥 Download CSV",
+                data=dataframe_to_csv_bytes(df_audit_comp),
+                file_name="reconcileai_audit_compliance.csv",
+                mime="text/csv",
+                key="btn_dl_ac_csv",
+                use_container_width=True
+            )
+        with acdl_c2:
+            st.download_button(
+                "📥 Download Excel (.xlsx)",
+                data=dataframe_to_excel_bytes(df_audit_comp, sheet_name="ComplianceAuditLog"),
+                file_name="reconcileai_audit_compliance.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_dl_ac_xlsx",
+                use_container_width=True
+            )
+        with acdl_c3:
+            st.download_button(
+                "📥 Download JSON",
+                data=dict_to_json_bytes(audit_report_items),
+                file_name="reconcileai_audit_compliance.json",
+                mime="application/json",
+                key="btn_dl_ac_json",
+                use_container_width=True
+            )
+
+    # -------------------------------------------------------------------------
+    # Tab 5: Benchmark Evaluation Report
+    # -------------------------------------------------------------------------
+    with report_tab5:
+        st.markdown("#### **Phase 13 Evaluation Benchmark Report**")
+        st.caption("Execute objective, deterministic evaluation against isolated ground truth reference datasets and export complete metrics.")
+        st.markdown("""
+        <div style="background-color:#EEF2FF; border:1px solid #C7D2FE; border-left:4px solid #6366F1; border-radius:6px; padding:0.6rem 0.9rem; margin-bottom:1rem; font-size:0.85rem; color:#3730A3;">
+            🧪 <strong>HISTORICAL PHASE 13 BASELINE (Deterministic Engine)</strong>: Ground truth datasets remain isolated as a read-only evaluation reference. Evaluates classification safety, operational match rates, throughput, and Value-at-Risk.
+        </div>
+        """, unsafe_allow_html=True)
+
+        bm_choice = st.radio(
+            "Select Benchmark Dataset",
+            options=["Primary Benchmark (100 Scenarios / 289 Txns)", "Held-Out Test Set (25 Scenarios / 75 Txns)"],
+            horizontal=True,
+            key="reports_bm_choice"
+        )
+        is_held_out_sel = "Held-Out" in bm_choice
+
+        if st.button("🚀 Run Benchmark & Generate Report", key="btn_run_reports_benchmark", type="primary"):
+            with st.spinner("Executing non-mutating benchmark evaluation..."):
+                try:
+                    bm_result = client.run_benchmark(is_held_out=is_held_out_sel)
+                    st.session_state["last_reports_benchmark"] = bm_result
+                    st.success("✅ Benchmark evaluation completed successfully!")
+                except Exception as e:
+                    st.error(f"Benchmark execution failed: {e}")
+
+        saved_bm = st.session_state.get("last_reports_benchmark")
+        if saved_bm:
+            st.markdown("<br>", unsafe_allow_html=True)
+            cls_m = saved_bm.get("classification", {})
+            ops_m = saved_bm.get("operations", {})
+            perf_m = saved_bm.get("performance", {})
+            fin_m = saved_bm.get("financial", {})
+            dq_m = saved_bm.get("data_quality", {})
+
+            # Metric Cards
+            bmc1, bmc2, bmc3, bmc4, bmc5 = st.columns(5)
+            with bmc1:
+                st.metric("Accuracy", f"{cls_m.get('accuracy', 0.0):.2f}%")
+            with bmc2:
+                st.metric("Precision (Safety)", f"{cls_m.get('precision', 0.0):.2f}%")
+            with bmc3:
+                st.metric("Recall (Coverage)", f"{cls_m.get('recall', 0.0):.2f}%")
+            with bmc4:
+                st.metric("Auto-Match Rate", f"{ops_m.get('auto_reconciliation_rate', 0.0):.2f}%")
+            with bmc5:
+                st.metric("Throughput", f"{perf_m.get('throughput_txns_per_sec', 0.0):.1f} txns/s")
+
+            # Metrics Table
+            bm_summary_rows = [
+                {"Category": "Classification", "Metric": "Ground Truth Scenarios", "Value": str(cls_m.get("total_ground_truth_scenarios", 0))},
+                {"Category": "Classification", "Metric": "Accuracy", "Value": f"{cls_m.get('accuracy', 0.0):.2f}%"},
+                {"Category": "Classification", "Metric": "Precision (Safety)", "Value": f"{cls_m.get('precision', 0.0):.2f}%"},
+                {"Category": "Classification", "Metric": "Recall (Coverage)", "Value": f"{cls_m.get('recall', 0.0):.2f}%"},
+                {"Category": "Classification", "Metric": "Confusion Matrix", "Value": f"TP={cls_m.get('tp')}, TN={cls_m.get('tn')}, FP={cls_m.get('fp')}, FN={cls_m.get('fn')}"},
+                {"Category": "Operations", "Metric": "Candidate Clusters", "Value": str(ops_m.get("total_candidate_clusters", 0))},
+                {"Category": "Operations", "Metric": "Auto-Reconciled Count", "Value": f"{ops_m.get('auto_reconciled_count', 0)} ({ops_m.get('auto_reconciliation_rate', 0.0):.2f}%)"},
+                {"Category": "Operations", "Metric": "AI-Assisted Count", "Value": f"{ops_m.get('ai_assisted_count', 0)} ({ops_m.get('ai_assisted_rate', 0.0):.2f}%)"},
+                {"Category": "Operations", "Metric": "Fuzzy-Assisted Count", "Value": f"{ops_m.get('fuzzy_assisted_count', 0)} ({ops_m.get('fuzzy_assisted_rate', 0.0):.2f}%)"},
+                {"Category": "Operations", "Metric": "Human Review Routing", "Value": f"{ops_m.get('human_review_count', 0)} ({ops_m.get('human_review_routing_rate', 0.0):.2f}%)"},
+                {"Category": "Performance", "Metric": "Raw Transaction Count", "Value": str(perf_m.get("raw_transaction_count", 0))},
+                {"Category": "Performance", "Metric": "Elapsed Time", "Value": f"{perf_m.get('elapsed_seconds', 0.0):.4f}s"},
+                {"Category": "Performance", "Metric": "Throughput", "Value": f"{perf_m.get('throughput_txns_per_sec', 0.0):.2f} txns/sec"},
+                {"Category": "Financial", "Metric": "Total Transaction Value", "Value": format_inr(fin_m.get("total_transaction_value", 0.0))},
+                {"Category": "Financial", "Metric": "Unresolved Value-at-Risk", "Value": format_inr(fin_m.get("unresolved_value_at_risk", 0.0))},
+                {"Category": "Data Quality", "Metric": "Missing Predictions", "Value": str(dq_m.get("missing_prediction_count", 0))},
+                {"Category": "Data Quality", "Metric": "Duplicate Predictions", "Value": str(dq_m.get("duplicate_prediction_count", 0))},
+            ]
+            df_bm_table = pd.DataFrame(bm_summary_rows)
+            st.dataframe(df_bm_table, use_container_width=True, hide_index=True)
+
+            # Build Text Report
+            dataset_tag = "held_out" if is_held_out_sel else "primary"
+            text_lines = [
+                "=" * 60,
+                f"RECONCILEAI PHASE 13 BENCHMARK REPORT: {dataset_tag.upper()}",
+                "=" * 60,
+                f"Ground Truth Scenarios: {cls_m.get('total_ground_truth_scenarios')}",
+                f"Candidate Clusters:     {ops_m.get('total_candidate_clusters')}",
+                f"Raw Transactions:       {perf_m.get('raw_transaction_count')}",
+                "",
+                "--- Classification Performance ---",
+                f"Accuracy:                 {cls_m.get('accuracy', 0.0):.2f}%",
+                f"Precision (Safety):       {cls_m.get('precision', 0.0):.2f}%",
+                f"Recall (Coverage):        {cls_m.get('recall', 0.0):.2f}%",
+                f"Confusion Matrix:         TP={cls_m.get('tp')}, TN={cls_m.get('tn')}, FP={cls_m.get('fp')}, FN={cls_m.get('fn')}",
+                "",
+                "--- Operational Statistics ---",
+                f"Auto-Reconciliation Rate: {ops_m.get('auto_reconciliation_rate', 0.0):.2f}%",
+                f"AI-Assisted Rate:         {ops_m.get('ai_assisted_rate', 0.0):.2f}%",
+                f"Fuzzy-Assisted Rate:      {ops_m.get('fuzzy_assisted_rate', 0.0):.2f}%",
+                f"Human-Review Rate:        {ops_m.get('human_review_routing_rate', 0.0):.2f}%",
+                "",
+                "--- Financial Metrics ---",
+                f"Total Transaction Value:  INR {fin_m.get('total_transaction_value', 0.0):,.2f}",
+                f"Unresolved Value-at-Risk: INR {fin_m.get('unresolved_value_at_risk', 0.0):,.2f}",
+                "",
+                "--- Throughput & Efficiency ---",
+                f"Elapsed Time:             {perf_m.get('elapsed_seconds', 0.0):.4f}s",
+                f"Throughput:               {perf_m.get('throughput_txns_per_sec', 0.0):.2f} txns/sec",
+                "=" * 60,
+            ]
+            bm_text_content = "\n".join(text_lines)
+
+            st.divider()
+            st.markdown("##### 📥 **Download Benchmark Results**")
+            bmdl_c1, bmdl_c2, bmdl_c3 = st.columns(3)
+            with bmdl_c1:
+                st.download_button(
+                    "📥 Complete Report (JSON)",
+                    data=dict_to_json_bytes(saved_bm),
+                    file_name=f"reconcileai_benchmark_{dataset_tag}.json",
+                    mime="application/json",
+                    key="btn_dl_bm_json",
+                    use_container_width=True
+                )
+            with bmdl_c2:
+                st.download_button(
+                    "📥 Summary Briefing (Text)",
+                    data=text_to_bytes(bm_text_content),
+                    file_name=f"reconcileai_benchmark_{dataset_tag}.txt",
+                    mime="text/plain",
+                    key="btn_dl_bm_txt",
+                    use_container_width=True
+                )
+            with bmdl_c3:
+                st.download_button(
+                    "📥 Metrics Table (CSV)",
+                    data=dataframe_to_csv_bytes(df_bm_table),
+                    file_name=f"reconcileai_benchmark_{dataset_tag}.csv",
+                    mime="text/csv",
+                    key="btn_dl_bm_csv",
+                    use_container_width=True
+                )
 
 elif nav_selection == "⚙️ Operations & Controls":
     # -------------------------------------------------------------------------

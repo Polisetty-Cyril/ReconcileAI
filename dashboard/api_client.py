@@ -364,4 +364,93 @@ class ReconcileAPIClient:
         params = {"is_held_out": is_held_out, "data_dir": data_dir}
         return self._post("/benchmark/run", params=params)
 
+    # -------------------------------------------------------------------------
+    # 8. Phase 16 — Reporting & Complete Export Endpoints
+    # -------------------------------------------------------------------------
 
+    def get_executive_report(self) -> Dict[str, Any]:
+        """
+        Retrieves extended executive reconciliation metrics including transaction volume in INR.
+        """
+        return self._get("/reports/executive")
+
+    def get_reconciliation_report(
+        self,
+        final_decision: Optional[str] = None,
+        is_resolved: Optional[bool] = None,
+        reconciliation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieves complete multi-source reconciliation candidate clusters for three-leg reporting and export.
+        """
+        params: Dict[str, Any] = {}
+        if final_decision and final_decision != "ALL":
+            params["final_decision"] = final_decision
+        if is_resolved is not None:
+            params["is_resolved"] = is_resolved
+        if reconciliation_id:
+            params["reconciliation_id"] = reconciliation_id.strip()
+        return self._get("/reports/reconciliation", params=params)
+
+    def get_exception_aging_report(
+        self,
+        status: Optional[str] = None,
+        severity: Optional[str] = None,
+        category: Optional[str] = None,
+        sla_status: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieves detailed discrepancy records with SLA health, escalation hierarchy, and triage sorting.
+        """
+        params: Dict[str, Any] = {}
+        if status and status != "ALL":
+            params["status"] = status
+        if severity and severity != "ALL":
+            params["severity"] = severity
+        if category and category != "ALL":
+            params["category"] = category
+        if sla_status and sla_status != "ALL":
+            params["sla_status"] = sla_status
+        return self._get("/reports/exceptions", params=params)
+
+    def get_all_transactions(
+        self,
+        source: Optional[str] = None,
+        status: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieves all matching canonical transactions without pagination cap for complete exports.
+        """
+        params: Dict[str, Any] = {}
+        if source and source != "ALL":
+            params["source"] = source
+        if status and status != "ALL":
+            params["status"] = status
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return self._get("/reports/transactions", params=params)
+
+    def get_audit_compliance_report(
+        self,
+        entity: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        action: Optional[str] = None,
+        actor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieves complete immutable audit trail records for regulatory compliance export.
+        """
+        params: Dict[str, Any] = {}
+        if entity and entity != "ALL":
+            params["entity"] = entity
+        if entity_id:
+            params["entity_id"] = entity_id.strip()
+        if action and action != "ALL":
+            params["action"] = action
+        if actor and actor != "ALL":
+            params["actor"] = actor
+        return self._get("/reports/audit", params=params)

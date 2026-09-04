@@ -43,12 +43,17 @@ from backend.schemas.audit import (
 )
 from backend.schemas.report import (
     OperationalSummaryResponse,
+    ExecutiveReportResponse,
+    ReconciliationReportResponse,
+    ExceptionAgingReportResponse,
+    AuditComplianceReportResponse,
 )
 
 from backend.services.ingestion import IngestionService
 from backend.services.finance_controller import FinanceController
 from backend.services.audit_service import AuditService
 from backend.services.reconciliation import DeterministicReconciliationEngine
+from backend.services.reporting_service import ReportingService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -504,52 +509,96 @@ def get_operational_summary(
 ):
     """
     Returns real-time operational summary metrics aggregated from current database state.
-    Includes reconciliation rates, open exceptions, value at risk, and category breakdowns.
+    Includes reconciliation rates, open exceptions, value at risk, category breakdowns, and decisions.
     """
-    total_txns = db.query(Transaction).count()
-    all_results = db.query(ReconciliationResult).all()
-    total_results = len(all_results)
-    auto_reconciled = sum(1 for r in all_results if r.final_decision == "AUTO_RECONCILED")
+    return ReportingService.get_operational_summary(db=db)
 
-    all_exceptions = db.query(ReconciliationException).all()
-    total_exceptions = len(all_exceptions)
-    open_exceptions = [e for e in all_exceptions if e.status == "OPEN"]
-    approved_exceptions = sum(1 for e in all_exceptions if e.status == "APPROVED")
-    rejected_exceptions = sum(1 for e in all_exceptions if e.status == "REJECTED")
+@app.get("/reports/executive", response_model=ExecutiveReportResponse, status_code=status.HTTP_200_OK, tags=["Reports"])
+def get_executive_report(
+    db: Session = Depends(get_db)
+):
+    """
+    Returns comprehensive executive financial statement metrics including transaction volume in INR.
+    """
+    return ReportingService.get_executive_report(db=db)
 
-    auto_rate = round(auto_reconciled / total_results * 100, 2) if total_results else 0.0
-    var_amount = round(sum(e.difference_amount for e in open_exceptions), 2)
+@app.get("/reports/reconciliation", response_model=ReconciliationReportResponse, status_code=status.HTTP_200_OK, tags=["Reports"])
+def get_reconciliation_report(
+    final_decision: Optional[str] = Query(None, description="Filter by final decision"),
+    is_resolved: Optional[bool] = Query(None, description="Filter by resolution state"),
+    reconciliation_id: Optional[str] = Query(None, description="Filter by exact cluster ID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns complete multi-source reconciliation records for three-leg reporting and full exports.
+    """
+    items = ReportingService.get_reconciliation_report(
+        db=db,
+        final_decision=final_decision,
+        is_resolved=is_resolved,
+        reconciliation_id=reconciliation_id
+    )
+    return {"total": len(items), "items": items}
 
-    # Severity breakdown
-    severity_counts: Dict[str, int] = {}
-    for e in all_exceptions:
-        severity_counts[e.severity] = severity_counts.get(e.severity, 0) + 1
+@app.get("/reports/exceptions", response_model=ExceptionAgingReportResponse, status_code=status.HTTP_200_OK, tags=["Reports"])
+def get_exception_aging_report(
+    status: Optional[str] = Query(None, description="Filter by lifecycle status (OPEN, APPROVED, REJECTED)"),
+    severity: Optional[str] = Query(None, description="Filter by discrepancy severity"),
+    category: Optional[str] = Query(None, description="Filter by discrepancy category"),
+    sla_status: Optional[str] = Query(None, description="Filter by SLA urgency status"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns detailed discrepancy records with SLA health, escalation hierarchy, and triage sorting.
+    """
+    items = ReportingService.get_exception_aging_report(
+        db=db,
+        status=status,
+        severity=severity,
+        category=category,
+        sla_status=sla_status
+    )
+    return {"total": len(items), "items": items}
 
-    # Category breakdown
-    category_counts: Dict[str, int] = {}
-    for e in all_exceptions:
-        category_counts[e.category] = category_counts.get(e.category, 0) + 1
+@app.get("/reports/transactions", status_code=status.HTTP_200_OK, tags=["Reports"])
+def get_all_transactions_report(
+    source: Optional[str] = Query(None, description="Filter by source (GATEWAY, BANK, ERP)"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by transaction status"),
+    start_date: Optional[datetime] = Query(None, description="Filter on or after timestamp"),
+    end_date: Optional[datetime] = Query(None, description="Filter on or before timestamp"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns all canonical transactions matching filters without pagination cap for complete export.
+    """
+    items = ReportingService.get_all_transactions(
+        db=db,
+        source=source,
+        status_filter=status_filter,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return {"total": len(items), "items": items}
 
-    # SLA status breakdown
-    sla_counts: Dict[str, int] = {}
-    for e in all_exceptions:
-        status_val = getattr(e, "sla_status", "OK")
-        sla_counts[status_val] = sla_counts.get(status_val, 0) + 1
-
-    return {
-        "total_transactions": total_txns,
-        "total_reconciliation_results": total_results,
-        "total_auto_reconciled": auto_reconciled,
-        "total_exceptions": total_exceptions,
-        "open_exceptions": len(open_exceptions),
-        "approved_exceptions": approved_exceptions,
-        "rejected_exceptions": rejected_exceptions,
-        "auto_reconciliation_rate": auto_rate,
-        "unresolved_amount_inr": var_amount,
-        "exceptions_by_severity": severity_counts,
-        "exceptions_by_category": category_counts,
-        "sla_status_breakdown": sla_counts
-    }
+@app.get("/reports/audit", response_model=AuditComplianceReportResponse, status_code=status.HTTP_200_OK, tags=["Reports"])
+def get_audit_compliance_report(
+    entity: Optional[str] = Query(None, description="Filter by entity type"),
+    entity_id: Optional[str] = Query(None, description="Filter by entity ID"),
+    action: Optional[str] = Query(None, description="Filter by action name"),
+    actor: Optional[str] = Query(None, description="Filter by actor name"),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns complete immutable audit logs matching filters for regulatory compliance export.
+    """
+    items = ReportingService.get_audit_compliance_report(
+        db=db,
+        entity=entity,
+        entity_id=entity_id,
+        action=action,
+        actor=actor
+    )
+    return {"total": len(items), "items": items}
 
 # -----------------------------------------------------------------------------
 # Phase 15 Extension — Benchmark Runner Endpoint
