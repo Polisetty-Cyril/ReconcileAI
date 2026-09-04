@@ -402,6 +402,15 @@ def test_different_reviewer_reapproval_conflict_rejected():
     assert response.status_code == 400
     assert "different reviewer" in response.json()["detail"].lower()
 
+def test_different_reviewer_rerejection_conflict_rejected():
+    """Verify that a different reviewer cannot overwrite an existing rejection without explicit policy."""
+    client.post("/exceptions/TEST_EXC_003/reject", json={"reviewer_id": "operator_alice"})
+
+    # Different reviewer attempts to reject
+    response = client.post("/exceptions/TEST_EXC_003/reject", json={"reviewer_id": "operator_bob"})
+    assert response.status_code == 400
+    assert "different reviewer" in response.json()["detail"].lower()
+
 # -----------------------------------------------------------------------------
 # 6. AI Safety & Authoritative Human Decision Tests
 # -----------------------------------------------------------------------------

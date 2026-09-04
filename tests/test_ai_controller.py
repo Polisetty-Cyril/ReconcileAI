@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import pytest
 from typing import Any, Dict, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from pydantic import ValidationError
 
+from backend.config import settings
 from backend.database import SessionLocal, init_db
 from backend.models.audit import AuditLog
 from backend.models.exception import ReconciliationException
 from backend.models.reconciliation import ReconciliationResult
+from backend.services.fuzzy_matcher import FuzzyMatchEngine
 from backend.schemas.ai_controller import (
     AIControllerResult,
     ALLOWED_RECOMMENDATIONS,
@@ -995,3 +997,247 @@ class TestBatchProcessing:
 
         audit_entries = db_session.query(AuditLog).filter(AuditLog.entity_id.like("TEST_AI_BATCH_%")).all()
         assert len(audit_entries) == 3
+
+
+# ===========================================================================
+# I. Phase 17 Task 3 — AI / LLM Failure-Path Hardening Tests
+# ===========================================================================
+
+class TestFailurePathHardening:
+    """
+    Focused tests for AI / LLM failure paths, boundary conditions, and offline safety:
+    1. Truncated / Incomplete JSON handling and fallback
+    2. Empty / Whitespace-only LLM output handling and fallback
+    3. Unexpected non-dict response handling and fallback
+    4. Fuzzy investigation failure & boundary verification
+    5. AI-disabled / Heuristic-only offline configuration verification
+    """
+
+    # -----------------------------------------------------------------------
+    # 1. Truncated / Incomplete JSON
+    # -----------------------------------------------------------------------
+    def test_truncated_incomplete_json_rejection_and_heuristic_fallback(self):
+        """
+        Verify malformed / truncated JSON output is rejected by _parse_llm_json
+        and AIController safely falls back to HeuristicLLMClient without escaping exceptions.
+        """
+        # A. Direct JSON parse verification
+        truncated_samples = [
+            '{"recommendation": "REVIEW", "confidence":',
+            '{"recommendation": "REVIEW",',
+            '{"recommendation": "AUTO_RECONCILE", "confidence": 0.95',
+            '{"reason": "Incomplete json string...',
+        ]
+        for sample in truncated_samples:
+            with pytest.raises(ValueError, match="LLM response is not valid JSON"):
+                _parse_llm_json(sample)
+
+        # B. AIController integration fallback verification
+        class TruncatedJsonClient(BaseLLMClient):
+            def reason(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
+                # Simulates an LLM returning truncated text that fails JSON decode
+                return _parse_llm_json('{"recommendation": "REVIEW", "confidence":')
+
+        controller = AIController(client=TruncatedJsonClient())
+        result = make_test_result(recon_id="TEST_AI_FAIL_TRUNC", discrepancy_amount=250.0)
+        exc = make_test_exception(
+            exc_id="TEST_AI_EXC_TRUNC",
+            recon_id="TEST_AI_FAIL_TRUNC",
+            category="AMOUNT_MISMATCH",
+            severity="HIGH",
+            diff_amount=250.0,
+        )
+
+        # Must NOT raise unhandled JSONDecodeError or ValueError
+        ai_result = controller.investigate(result, exception=exc)
+
+        assert isinstance(ai_result, AIControllerResult)
+        # AMOUNT_MISMATCH + HIGH in Heuristic rule table -> REVIEW, confidence 0.90, risk HIGH
+        assert ai_result.recommendation == "REVIEW"
+        assert ai_result.confidence == 0.90
+        assert ai_result.risk == "HIGH"
+
+    # -----------------------------------------------------------------------
+    # 2. Empty / Whitespace LLM Output
+    # -----------------------------------------------------------------------
+    def test_empty_and_whitespace_llm_output_rejection_and_fallback(self):
+        """
+        Verify empty and whitespace-only LLM output is rejected by _parse_llm_json
+        and AIController safely falls back to HeuristicLLMClient.
+        """
+        empty_samples = ["", "   ", "\n\t  \n", "     \r\n "]
+        for sample in empty_samples:
+            with pytest.raises(ValueError, match="LLM response is not valid JSON"):
+                _parse_llm_json(sample)
+
+        class WhitespaceOutputClient(BaseLLMClient):
+            def reason(self, evidence: Dict[str, Any]) -> Dict[str, Any]:
+                # Simulates empty/whitespace response from model
+                return _parse_llm_json("   \n\t  ")
+
+        controller = AIController(client=WhitespaceOutputClient())
+        result = make_test_result(recon_id="TEST_AI_FAIL_EMPTY", discrepancy_amount=15000.0)
+        exc = make_test_exception(
+            exc_id="TEST_AI_EXC_EMPTY",
+            recon_id="TEST_AI_FAIL_EMPTY",
+            category="AMOUNT_MISMATCH",
+            severity="CRITICAL",
+            diff_amount=15000.0,
+        )
+
+        ai_result = controller.investigate(result, exception=exc)
+
+        assert isinstance(ai_result, AIControllerResult)
+        # AMOUNT_MISMATCH + CRITICAL in Heuristic rule table -> ESCALATE, confidence 0.95, risk CRITICAL
+        assert ai_result.recommendation == "ESCALATE"
+        assert ai_result.confidence == 0.95
+        assert ai_result.risk == "CRITICAL"
+
+    # -----------------------------------------------------------------------
+    # 3. Unexpected Non-Dict LLM Response
+    # -----------------------------------------------------------------------
+    def test_unexpected_non_dict_llm_response_falls_back_safely(self):
+        """
+        Verify custom LLM clients returning None, list, string, or int are caught
+        by AIController._call_client and safely fall back to HeuristicLLMClient.
+        """
+        result = make_test_result(recon_id="TEST_AI_FAIL_NONDICT", discrepancy_amount=50.0)
+        exc = make_test_exception(
+            exc_id="TEST_AI_EXC_NONDICT",
+            recon_id="TEST_AI_FAIL_NONDICT",
+            category="DATE_MISMATCH",
+            severity="LOW",
+            diff_amount=50.0,
+        )
+        evidence = _collect_evidence(result, exc)
+
+        invalid_responses = [
+            None,
+            ["AUTO_RECONCILE", 0.99, "Low risk match"],
+            "recommendation: REVIEW, confidence: 0.80",
+            12345,
+            True,
+        ]
+
+        for invalid_raw in invalid_responses:
+            class NonDictClient(BaseLLMClient):
+                def reason(self, ev: Dict[str, Any]) -> Any:
+                    return invalid_raw
+
+            # 1. Test existing _call_client contract directly
+            call_result = AIController._call_client(NonDictClient(), evidence)
+            assert call_result is None, f"Expected _call_client to return None for {type(invalid_raw)}"
+
+            # 2. Test full investigation fallback
+            controller = AIController(client=NonDictClient())
+            ai_result = controller.investigate(result, exception=exc)
+
+            assert isinstance(ai_result, AIControllerResult)
+            # DATE_MISMATCH + LOW in Heuristic rule table -> REVIEW, confidence 0.72, risk LOW
+            assert ai_result.recommendation == "REVIEW"
+            assert ai_result.confidence == 0.72
+            assert ai_result.risk == "LOW"
+
+    # -----------------------------------------------------------------------
+    # 4. Fuzzy Investigation Failure & Boundary Verification
+    # -----------------------------------------------------------------------
+    def test_fuzzy_investigation_boundary_and_failure_behavior(self):
+        """
+        Inspect and verify FuzzyMatchEngine public interface (score_pair, find_best_candidates).
+        Verify investigate_with_fuzzy() behavior when:
+        A. Fuzzy candidate search produces no candidate matches (returns []) -> proceeds gracefully
+        B. Fuzzy engine scoring raises an exception -> propagates to caller (architectural limitation)
+        """
+        result = make_test_result(recon_id="TEST_AI_FUZZ_FAIL", discrepancy_amount=100.0)
+        exc = make_test_exception(
+            exc_id="TEST_AI_EXC_FUZZ_FAIL",
+            recon_id="TEST_AI_FUZZ_FAIL",
+            category="AMOUNT_MISMATCH",
+            severity="MEDIUM",
+            diff_amount=100.0,
+        )
+        fake_gw = {"transaction_id": "GW_001", "amount": 1000.0, "reference_id": "REF123"}
+        fake_bank = {"transaction_id": "BNK_001", "amount": 1000.0, "reference_id": "REF999"}
+
+        # Case A: Fuzzy engine search returns empty list (no candidates match criteria)
+        fake_fuzzy_engine_empty = MagicMock(spec=FuzzyMatchEngine)
+        fake_fuzzy_engine_empty.find_best_candidates.return_value = []
+
+        controller_empty = AIController(
+            client=HeuristicLLMClient(),
+            fuzzy_engine=fake_fuzzy_engine_empty,
+        )
+        ai_res_empty = controller_empty.investigate_with_fuzzy(
+            result=result,
+            exception=exc,
+            gateway_txn=fake_gw,
+            candidate_banks=[fake_bank],
+        )
+        assert isinstance(ai_res_empty, AIControllerResult)
+        assert ai_res_empty.recommendation == "REVIEW"
+        fake_fuzzy_engine_empty.find_best_candidates.assert_called_once()
+
+        # Case B: Fuzzy engine score_pair raises an unhandled exception
+        # Document the current architecture limitation: investigate_with_fuzzy does NOT catch
+        # exceptions raised by score_pair or find_best_candidates.
+        fake_fuzzy_engine_error = MagicMock(spec=FuzzyMatchEngine)
+        fake_fuzzy_engine_error.score_pair.side_effect = RuntimeError("FuzzyMatchEngine internal error")
+
+        controller_error = AIController(
+            client=HeuristicLLMClient(),
+            fuzzy_engine=fake_fuzzy_engine_error,
+        )
+        with pytest.raises(RuntimeError, match="FuzzyMatchEngine internal error"):
+            controller_error.investigate_with_fuzzy(
+                result=result,
+                exception=exc,
+                gateway_txn=fake_gw,
+                bank_txn=fake_bank,
+            )
+
+    # -----------------------------------------------------------------------
+    # 5. AI-Disabled / Heuristic-Only Configuration
+    # -----------------------------------------------------------------------
+    def test_heuristic_only_configuration_offline_and_no_network(self):
+        """
+        Verify the supported existing configuration path for AI-disabled or heuristic-only operation:
+        - LLM_PROVIDER = "heuristic" (default) or empty API key produces HeuristicLLMClient
+        - No external SDK or network call occurs
+        - Completely deterministic and offline
+        """
+        # Verify get_llm_client provider selection
+        client = get_llm_client(provider="heuristic", api_key="")
+        assert isinstance(client, HeuristicLLMClient)
+
+        # Verify AIController with default provider ("heuristic")
+        with patch.object(settings, "LLM_PROVIDER", "heuristic"), \
+             patch.object(settings, "LLM_API_KEY", ""), \
+             patch.object(settings, "GEMINI_API_KEY", ""):
+
+            # Patch cloud provider client constructors to guarantee no network/SDK usage
+            with patch("backend.services.llm_client.OpenAILLMClient") as mock_openai, \
+                 patch("backend.services.llm_client.GroqLLMClient") as mock_groq, \
+                 patch("backend.services.llm_client.GeminiLLMClient") as mock_gemini:
+
+                controller = AIController()
+                assert isinstance(controller._client, HeuristicLLMClient)
+
+                result = make_test_result(recon_id="TEST_AI_OFFLINE", discrepancy_amount=0.0)
+                exc = make_test_exception(
+                    exc_id="TEST_AI_EXC_OFFLINE",
+                    recon_id="TEST_AI_OFFLINE",
+                    category="FAILED_PAYMENT",
+                    severity="LOW",
+                    diff_amount=0.0,
+                )
+
+                ai_res = controller.investigate(result, exception=exc)
+
+                assert isinstance(ai_res, AIControllerResult)
+                assert ai_res.recommendation == "AUTO_RECONCILE"
+                assert ai_res.confidence == 0.98
+
+                # Verify none of the external provider clients were instantiated
+                mock_openai.assert_not_called()
+                mock_groq.assert_not_called()
+                mock_gemini.assert_not_called()

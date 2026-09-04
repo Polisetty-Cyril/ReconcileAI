@@ -506,3 +506,387 @@ class TestReconcileAPIClientReportingMethods:
             params={"entity": "TRANSACTION"},
             timeout=10
         )
+
+
+# =============================================================================
+# 5. Phase 17 Task 5A — Reporting Robustness Tests
+# =============================================================================
+
+class TestReportingRobustness:
+    """
+    Robustness tests for ReportingService:
+    1. Empty database safety (no ZeroDivisionError, zero totals, empty list collections)
+    2. Extreme and negative financial value handling & absolute-magnitude triage sorting
+    """
+
+    def test_reporting_service_empty_database_safety(self):
+        """
+        Execute all six ReportingService methods on an empty database.
+        Verifies:
+        - ZeroDivisionError does not occur when total_reconciliation_results == 0
+        - auto_reconciliation_rate is 0.0
+        - Monetary totals are 0.0
+        - List-returning queries return empty lists []
+        """
+        db: Session = SessionLocal()
+        try:
+            with audit_log_cleanup_context():
+                db.query(AuditLog).delete(synchronize_session=False)
+                db.query(ReconciliationException).delete(synchronize_session=False)
+                db.query(ReconciliationResult).delete(synchronize_session=False)
+                db.query(Transaction).delete(synchronize_session=False)
+                db.commit()
+
+            # 1. Operational summary
+            op_summary = ReportingService.get_operational_summary(db)
+            assert op_summary["total_transactions"] == 0
+            assert op_summary["total_reconciliation_results"] == 0
+            assert op_summary["total_auto_reconciled"] == 0
+            assert op_summary["auto_reconciliation_rate"] == 0.0
+            assert op_summary["total_exceptions"] == 0
+            assert op_summary["open_exceptions"] == 0
+            assert op_summary["unresolved_amount_inr"] == 0.0
+            assert op_summary["exceptions_by_severity"] == {}
+            assert op_summary["exceptions_by_category"] == {}
+            assert op_summary["sla_status_breakdown"] == {}
+            assert op_summary["decision_breakdown"] == {}
+
+            # 2. Executive report
+            exec_rep = ReportingService.get_executive_report(db)
+            assert exec_rep["total_transactions"] == 0
+            assert exec_rep["total_transaction_value_inr"] == 0.0
+            assert exec_rep["auto_reconciliation_rate"] == 0.0
+            assert exec_rep["unresolved_amount_inr"] == 0.0
+            assert "generated_at" in exec_rep
+
+            # 3. Reconciliation report
+            recon_rep = ReportingService.get_reconciliation_report(db)
+            assert recon_rep == []
+
+            # 4. Exception aging report
+            exc_rep = ReportingService.get_exception_aging_report(db)
+            assert exc_rep == []
+
+            # 5. Audit compliance report
+            audit_rep = ReportingService.get_audit_compliance_report(db)
+            assert audit_rep == []
+
+            # 6. All transactions
+            tx_rep = ReportingService.get_all_transactions(db)
+            assert tx_rep == []
+        finally:
+            db.close()
+
+    def test_reporting_service_extreme_and_negative_financial_values(self):
+        """
+        Verify ReportingService calculations with extreme amounts and negative/refund discrepancies.
+        Verifies:
+        - Extreme amounts (10 billion INR) sum correctly without precision overflow
+        - Zero discrepancy results calculate auto rates correctly
+        - Legitimate negative differences (e.g. refunds / chargebacks) sum correctly in VaR
+        - Exception triage ordering uses absolute-magnitude ranking (-abs(difference_amount))
+        """
+        now = datetime.now(timezone.utc)
+        db: Session = SessionLocal()
+        try:
+            with audit_log_cleanup_context():
+                db.query(AuditLog).delete(synchronize_session=False)
+                db.query(ReconciliationException).delete(synchronize_session=False)
+                db.query(ReconciliationResult).delete(synchronize_session=False)
+                db.query(Transaction).delete(synchronize_session=False)
+                db.commit()
+
+            # Extreme transaction: 10 billion INR
+            t_huge = Transaction(
+                transaction_id="TX_EXT_01",
+                source="GATEWAY",
+                amount=10_000_000_000.00,
+                currency="INR",
+                status="CAPTURED",
+                transaction_type="PAYMENT",
+                transaction_date=now,
+            )
+            # Standard payment transaction
+            t_norm = Transaction(
+                transaction_id="TX_EXT_02",
+                source="BANK",
+                amount=250.75,
+                currency="INR",
+                status="SETTLED",
+                transaction_type="SETTLEMENT",
+                transaction_date=now,
+            )
+            # Legitimate refund transaction with negative amount
+            t_refund = Transaction(
+                transaction_id="TX_EXT_03",
+                source="GATEWAY",
+                amount=-2500.00,
+                currency="INR",
+                status="SETTLED",
+                transaction_type="REFUND",
+                transaction_date=now,
+            )
+            db.add_all([t_huge, t_norm, t_refund])
+
+            # Reconciliation with zero discrepancy
+            r_zero = ReconciliationResult(
+                reconciliation_id="REC_EXT_01",
+                gateway_transaction_id="TX_EXT_01",
+                match_score=100.0,
+                matching_method="EXACT_RULE",
+                final_decision="AUTO_RECONCILED",
+                discrepancy_amount=0.00,
+                is_resolved=True,
+                reconciled_at=now,
+            )
+            # Reconciliation with review decision
+            r_rev = ReconciliationResult(
+                reconciliation_id="REC_EXT_02",
+                gateway_transaction_id="TX_EXT_02",
+                match_score=60.0,
+                matching_method="RULE_BASED",
+                final_decision="HUMAN_REVIEW",
+                discrepancy_amount=500.00,
+                is_resolved=False,
+                reconciled_at=now,
+            )
+            db.add_all([r_zero, r_rev])
+
+            # Three open exceptions with same SLA and severity to test triage magnitude:
+            # e_large: difference_amount = 500.00
+            # e_small: difference_amount = 100.00
+            # e_zero: difference_amount = 0.00
+            e_large = ReconciliationException(
+                exception_id="EXC_EXT_01",
+                reconciliation_id="REC_EXT_02",
+                transaction_id="TX_EXT_02",
+                category="AMOUNT_MISMATCH",
+                severity="HIGH",
+                difference_amount=500.00,
+                status="OPEN",
+                sla_duration_hours=24.0,
+                sla_status="OK",
+                escalation_level=0,
+                created_at=now,
+            )
+            e_small = ReconciliationException(
+                exception_id="EXC_EXT_02",
+                reconciliation_id="REC_EXT_02",
+                transaction_id="TX_EXT_02",
+                category="PARTIAL_PAYMENT",
+                severity="HIGH",
+                difference_amount=100.00,
+                status="OPEN",
+                sla_duration_hours=24.0,
+                sla_status="OK",
+                escalation_level=0,
+                created_at=now,
+            )
+            e_zero = ReconciliationException(
+                exception_id="EXC_EXT_03",
+                reconciliation_id="REC_EXT_01",
+                transaction_id="TX_EXT_01",
+                category="DATE_MISMATCH",
+                severity="HIGH",
+                difference_amount=0.00,
+                status="OPEN",
+                sla_duration_hours=24.0,
+                sla_status="OK",
+                escalation_level=0,
+                created_at=now,
+            )
+            db.add_all([e_large, e_small, e_zero])
+            db.commit()
+
+            # Verify executive report handling of 10 billion INR with refund deduction
+            exec_rep = ReportingService.get_executive_report(db)
+            assert exec_rep["total_transactions"] == 3
+            # 10,000,000,000.00 + 250.75 + (-2500.00) = 9,999,997,750.75
+            assert exec_rep["total_transaction_value_inr"] == 9_999_997_750.75
+            assert exec_rep["auto_reconciliation_rate"] == 50.0
+            # VaR sums open non-negative difference_amounts: 500.00 + 100.00 + 0.00 = 600.00
+            assert exec_rep["unresolved_amount_inr"] == 600.00
+            assert exec_rep["unresolved_amount_inr"] >= 0.0
+
+            # Verify triage sort ordering in get_exception_aging_report
+            # All 3 have sla_status="OK", severity="HIGH", escalation_level=0.
+            # Triage sort sorts by -abs(float(x.difference_amount or 0.0)):
+            # 1. e_large: 500.00 -> first
+            # 2. e_small: 100.00 -> second
+            # 3. e_zero: 0.00 -> third
+            aging_items = ReportingService.get_exception_aging_report(db)
+            assert len(aging_items) == 3
+            assert aging_items[0]["exception_id"] == "EXC_EXT_01"
+            assert aging_items[0]["difference_amount"] == 500.00
+            assert aging_items[1]["exception_id"] == "EXC_EXT_02"
+            assert aging_items[1]["difference_amount"] == 100.00
+            assert aging_items[2]["exception_id"] == "EXC_EXT_03"
+            assert aging_items[2]["difference_amount"] == 0.00
+        finally:
+            with audit_log_cleanup_context():
+                db.query(AuditLog).delete(synchronize_session=False)
+                db.query(ReconciliationException).delete(synchronize_session=False)
+                db.query(ReconciliationResult).delete(synchronize_session=False)
+                db.query(Transaction).delete(synchronize_session=False)
+                db.commit()
+            db.close()
+
+    def test_export_utilities_empty_report_datasets(self):
+        """
+        Export empty report datasets through existing export utilities: CSV, XLSX, JSON.
+        Verifies:
+        - Valid bytes returned for all formats
+        - CSV encodes empty or header-only bytes cleanly
+        - XLSX binary streams can be opened with openpyxl without corruption
+        - JSON parses into empty dict/list
+        """
+        # Case A: Completely empty DataFrame (0 rows, 0 cols)
+        df_empty = pd.DataFrame()
+        csv_bytes_empty = dataframe_to_csv_bytes(df_empty)
+        assert isinstance(csv_bytes_empty, bytes)
+        assert csv_bytes_empty == b""
+
+        # Case B: Empty report DataFrame with standard schema columns (0 rows, N cols)
+        report_cols = ["reconciliation_id", "match_score", "discrepancy_amount", "final_decision"]
+        df_cols_empty = pd.DataFrame(columns=report_cols)
+        csv_bytes_cols = dataframe_to_csv_bytes(df_cols_empty)
+        assert isinstance(csv_bytes_cols, bytes)
+        assert csv_bytes_cols.decode("utf-8").strip() == ",".join(report_cols)
+
+        # Case C: Excel export with empty DataFrame
+        xlsx_single = dataframe_to_excel_bytes(df_cols_empty, sheet_name="EmptyReconReport")
+        assert isinstance(xlsx_single, bytes)
+        wb_single = load_workbook(io.BytesIO(xlsx_single))
+        assert "EmptyReconReport" in wb_single.sheetnames
+        sheet = wb_single["EmptyReconReport"]
+        assert [cell.value for cell in sheet[1]] == report_cols
+
+        # Case D: Excel multi-sheet export with empty sheets mapping
+        xlsx_multi = dataframes_to_excel_bytes({"Exceptions": pd.DataFrame(), "Audit": df_cols_empty})
+        assert isinstance(xlsx_multi, bytes)
+        wb_multi = load_workbook(io.BytesIO(xlsx_multi))
+        assert "Exceptions" in wb_multi.sheetnames
+        assert "Audit" in wb_multi.sheetnames
+
+        # Case E: JSON export with empty list and empty dict
+        json_bytes_list = dict_to_json_bytes([])
+        assert isinstance(json_bytes_list, bytes)
+        assert json.loads(json_bytes_list.decode("utf-8")) == []
+
+        json_bytes_dict = dict_to_json_bytes({})
+        assert isinstance(json_bytes_dict, bytes)
+        assert json.loads(json_bytes_dict.decode("utf-8")) == {}
+
+        json_bytes_none = dict_to_json_bytes(None)
+        assert isinstance(json_bytes_none, bytes)
+        assert json.loads(json_bytes_none.decode("utf-8")) == {}
+
+    def test_export_utilities_unicode_inr_and_multilingual_preservation(self):
+        """
+        Verify export utilities preserve Indian Rupee symbols (₹), Devanagari names ("राजेश शर्मा"),
+        emojis ("✅"), and multilingual text across CSV, JSON, and Excel formats without mojibake.
+        """
+        records = [
+            {
+                "customer_name": "राजेश शर्मा",
+                "narration": "UPI P2P transfer to Priya ✅",
+                "formatted_amount": "₹45,000.75",
+                "audit_reason": "Manual resolution approved by Ops: ₹45,000.75 reconciled",
+            },
+            {
+                "customer_name": "அனிதா ரமேஷ்",
+                "narration": "IMPS settlement with vendor ⚡",
+                "formatted_amount": "₹1,25,000.00",
+                "audit_reason": "Audit review verified: ₹1,25,000.00 matched",
+            }
+        ]
+        df = pd.DataFrame(records)
+
+        # 1. CSV UTF-8 verification
+        csv_bytes = dataframe_to_csv_bytes(df)
+        csv_decoded = csv_bytes.decode("utf-8")
+        assert "₹45,000.75" in csv_decoded
+        assert "राजेश शर्मा" in csv_decoded
+        assert "✅" in csv_decoded
+        assert "அனிதா ரமேஷ்" in csv_decoded
+        assert "⚡" in csv_decoded
+        assert "Audit review verified: ₹1,25,000.00 matched" in csv_decoded
+
+        # 2. JSON UTF-8 verification (ensure_ascii=False ensures actual characters)
+        json_bytes = dict_to_json_bytes(records)
+        json_decoded = json_bytes.decode("utf-8")
+        assert "₹45,000.75" in json_decoded
+        assert "राजेश शर्मा" in json_decoded
+        assert "✅" in json_decoded
+        assert "அனிதா ரமேஷ்" in json_decoded
+        # Parse back to verify structural integrity
+        parsed_json = json.loads(json_decoded)
+        assert parsed_json[0]["customer_name"] == "राजेश शर्मा"
+        assert parsed_json[0]["formatted_amount"] == "₹45,000.75"
+        assert parsed_json[0]["narration"] == "UPI P2P transfer to Priya ✅"
+        assert parsed_json[1]["customer_name"] == "அனிதா ரமேஷ்"
+
+        # 3. Excel openpyxl cell value verification
+        xlsx_bytes = dataframe_to_excel_bytes(df, sheet_name="MultilingualReport")
+        wb = load_workbook(io.BytesIO(xlsx_bytes))
+        sheet = wb["MultilingualReport"]
+        # Row 1 is header, Row 2 is record 0, Row 3 is record 1
+        assert sheet["A2"].value == "राजेश शर्मा"
+        assert sheet["B2"].value == "UPI P2P transfer to Priya ✅"
+        assert sheet["C2"].value == "₹45,000.75"
+        assert sheet["D2"].value == "Manual resolution approved by Ops: ₹45,000.75 reconciled"
+        assert sheet["A3"].value == "அனிதா ரமேஷ்"
+        assert sheet["C3"].value == "₹1,25,000.00"
+
+    def test_export_roundtrip_data_fidelity(self):
+        """
+        Verify export round-trip fidelity across CSV and JSON:
+        - Identifiers, monetary values, timestamps, and Unicode text remain semantically correct
+        - No material financial precision is lost
+        """
+        iso_timestamp = "2026-09-04T12:00:00+00:00"
+        dataset = [
+            {
+                "transaction_id": "TXN_FIDELITY_001",
+                "amount": 999999.99,
+                "fee": 15.50,
+                "timestamp": iso_timestamp,
+                "customer": "विक्रम साराभाई",
+                "status": "CAPTURED",
+            },
+            {
+                "transaction_id": "TXN_FIDELITY_002",
+                "amount": 0.05,
+                "fee": 0.00,
+                "timestamp": iso_timestamp,
+                "customer": "Sunita Williams",
+                "status": "SETTLED",
+            },
+        ]
+
+        # 1. JSON Roundtrip
+        json_bytes = dict_to_json_bytes(dataset)
+        parsed_json = json.loads(json_bytes.decode("utf-8"))
+        assert len(parsed_json) == 2
+        for orig, recovered in zip(dataset, parsed_json):
+            assert recovered["transaction_id"] == orig["transaction_id"]
+            assert recovered["amount"] == orig["amount"]
+            assert recovered["fee"] == orig["fee"]
+            assert recovered["timestamp"] == orig["timestamp"]
+            assert recovered["customer"] == orig["customer"]
+            assert recovered["status"] == orig["status"]
+
+        # 2. CSV Roundtrip via pandas
+        df_orig = pd.DataFrame(dataset)
+        csv_bytes = dataframe_to_csv_bytes(df_orig)
+        df_recovered = pd.read_csv(io.BytesIO(csv_bytes))
+
+        assert len(df_recovered) == 2
+        for idx, orig in enumerate(dataset):
+            row = df_recovered.iloc[idx]
+            assert str(row["transaction_id"]) == orig["transaction_id"]
+            assert round(float(row["amount"]), 2) == orig["amount"]
+            assert round(float(row["fee"]), 2) == orig["fee"]
+            assert str(row["timestamp"]) == orig["timestamp"]
+            assert str(row["customer"]) == orig["customer"]
+            assert str(row["status"]) == orig["status"]

@@ -465,6 +465,61 @@ class TestAPIErrorTranslation:
         with pytest.raises(APIClientError, match="Failed to parse JSON response"):
             client.health()
 
+    @patch("requests.post")
+    def test_run_reconciliation_http_failure_raises_status_error(self, mock_post, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.json.return_value = {"detail": "No staged transactions available for reconciliation"}
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(APIStatusError) as exc_info:
+            client.run_reconciliation()
+        assert exc_info.value.status_code == 400
+        assert "No staged transactions available for reconciliation" in exc_info.value.detail
+
+    @patch("requests.post")
+    def test_run_reconciliation_timeout_raises_timeout_error(self, mock_post, client):
+        mock_post.side_effect = requests.exceptions.Timeout("Reconciliation computation timed out")
+        with pytest.raises(APITimeoutError) as exc_info:
+            client.run_reconciliation()
+        assert "timed out after 45s" in str(exc_info.value)
+
+    @patch("requests.post")
+    def test_approve_and_reject_exception_api_status_error(self, mock_post, client):
+        # 1. Approval returns HTTP 400 (e.g. already resolved)
+        mock_resp_400 = MagicMock()
+        mock_resp_400.status_code = 400
+        mock_resp_400.json.return_value = {"detail": "Exception EXC_001 is already resolved and immutable"}
+        mock_post.return_value = mock_resp_400
+
+        with pytest.raises(APIStatusError) as exc_400:
+            client.approve_exception("EXC_001", reviewer_id="AUDITOR_1")
+        assert exc_400.value.status_code == 400
+        assert "Exception EXC_001 is already resolved and immutable" in exc_400.value.detail
+
+        # 2. Rejection returns HTTP 404 (e.g. nonexistent ID)
+        mock_resp_404 = MagicMock()
+        mock_resp_404.status_code = 404
+        mock_resp_404.json.return_value = {"detail": "Exception EXC_999 not found"}
+        mock_post.return_value = mock_resp_404
+
+        with pytest.raises(APIStatusError) as exc_404:
+            client.reject_exception("EXC_999", reviewer_id="AUDITOR_1")
+        assert exc_404.value.status_code == 404
+        assert "Exception EXC_999 not found" in exc_404.value.detail
+
+    @patch("requests.post")
+    def test_load_synthetic_failure_raises_status_error(self, mock_post, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.json.return_value = {"detail": "Synthetic data directory 'invalid_dir' not found"}
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(APIStatusError) as exc_info:
+            client.load_synthetic(data_dir="invalid_dir")
+        assert exc_info.value.status_code == 404
+        assert "Synthetic data directory 'invalid_dir' not found" in exc_info.value.detail
+
 
 # =============================================================================
 # 4. Currency and Escalation Formatting Helper Tests
