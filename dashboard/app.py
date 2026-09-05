@@ -15,6 +15,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
+from dotenv import load_dotenv, find_dotenv
+
+# Ensure environment variables (.env) are loaded for Streamlit process
+load_dotenv(find_dotenv(usecwd=True))
+
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -2351,7 +2356,7 @@ elif nav_selection == "⚙️ Operations & Controls":
     if st.button("⚡ Execute Reconciliation Pipeline", disabled=(not confirm_recon), key="btn_run_recon"):
         with st.spinner("Executing multi-source financial reconciliation pipeline..."):
             try:
-                recon_resp = client.run_reconciliation()
+                recon_resp = client.run_reconciliation(timeout=120)
                 st.session_state["last_op_recon_result"] = recon_resp
             except APIStatusError as err:
                 st.session_state["last_op_recon_result"] = {
@@ -2841,7 +2846,7 @@ elif nav_selection == "🎬 5-Minute Demo":
         if st.button("⚡ Run Multi-Source Reconciliation Pipeline", type="primary", key="btn_demo_run_reconcile"):
             with st.spinner("Executing reconciliation pipeline..."):
                 try:
-                    res = client.run_reconciliation()
+                    res = client.run_reconciliation(timeout=120)
                     st.session_state["demo_recon_result"] = res
                 except APIStatusError as err:
                     st.error(f"Reconciliation error (HTTP {err.status_code}): {err.detail}")
@@ -2867,11 +2872,11 @@ elif nav_selection == "🎬 5-Minute Demo":
             with s2_c1:
                 st.metric("Clusters Processed", r_res.get("total_clusters", 0))
             with s2_c2:
-                st.metric("Auto-Reconciled", r_res.get("auto_reconciled", 0))
+                st.metric("Auto-Reconciled", r_res.get("total_reconciled", r_res.get("auto_reconciled", 0)))
             with s2_c3:
-                st.metric("Exceptions Detected", r_res.get("exceptions_created", 0))
+                st.metric("Exceptions Detected", r_res.get("total_exceptions", r_res.get("exceptions_created", 0)))
             with s2_c4:
-                st.metric("Value-at-Risk", format_inr(r_res.get("unresolved_value_at_risk_inr", 0.0)))
+                st.metric("Value-at-Risk", format_inr(r_res.get("unresolved_value_at_risk", r_res.get("unresolved_value_at_risk_inr", 0.0))))
 
             if st.button("Proceed to Stage 3: Discrepancy Investigation ➡️", type="secondary", key="btn_demo_to_s3"):
                 st.session_state["demo_step"] = 3
@@ -2895,7 +2900,7 @@ elif nav_selection == "🎬 5-Minute Demo":
             st.warning("⚠️ No OPEN exceptions currently found in the queue. You can ingest synthetic data from Operations & Controls if needed.")
         else:
             exc_options = {
-                f"[{e.get('severity', 'UNKNOWN')}] {e.get('exception_id')} — {e.get('category')} (INR {float(e.get('amount_difference', 0.0)):,.2f})": e.get("exception_id")
+                f"[{e.get('severity', 'UNKNOWN')}] {e.get('exception_id')} — {e.get('category')} (INR {float(e.get('difference_amount', e.get('amount_difference', 0.0))):,.2f})": e.get("exception_id")
                 for e in open_exceptions
             }
             selected_label = st.selectbox(
@@ -2920,14 +2925,14 @@ elif nav_selection == "🎬 5-Minute Demo":
                 sev = exc_detail.get("severity", "MEDIUM")
                 st.metric("Severity", sev)
             with s3_c3:
-                st.metric("Amount Variance", format_inr(exc_detail.get("amount_difference", 0.0)))
+                st.metric("Amount Variance", format_inr(exc_detail.get("difference_amount", exc_detail.get("amount_difference", 0.0))))
             with s3_c4:
                 sla = exc_detail.get("sla_status", "OK")
                 esc = exc_detail.get("escalation_level", "L0")
                 st.metric("SLA / Escalation", f"{sla} ({esc})")
 
             st.markdown(
-                f"**Discrepancy Description**: {exc_detail.get('description', 'No description available.')}"
+                f"**Discrepancy Description**: {exc_detail.get('ai_explanation') or exc_detail.get('description', 'No description available.')}"
             )
 
             if st.button("Proceed to Stage 4: AI Advisory Analysis ➡️", type="secondary", key="btn_demo_to_s4"):
@@ -3015,7 +3020,7 @@ elif nav_selection == "🎬 5-Minute Demo":
             with btn_col1:
                 if st.button("✅ Approve Exception", type="primary", disabled=not confirm_check, key="btn_demo_approve"):
                     try:
-                        res = client.approve_exception(exc_id, reviewer=reviewer_id, notes=resolution_notes)
+                        res = client.approve_exception(exc_id, reviewer_id=reviewer_id, notes=resolution_notes)
                         st.session_state["demo_decision_result"] = {
                             "status": "APPROVED",
                             "exception_id": exc_id,
@@ -3030,7 +3035,7 @@ elif nav_selection == "🎬 5-Minute Demo":
             with btn_col2:
                 if st.button("❌ Reject Exception", type="secondary", disabled=not confirm_check, key="btn_demo_reject"):
                     try:
-                        res = client.reject_exception(exc_id, reviewer=reviewer_id, notes=resolution_notes)
+                        res = client.reject_exception(exc_id, reviewer_id=reviewer_id, notes=resolution_notes)
                         st.session_state["demo_decision_result"] = {
                             "status": "REJECTED",
                             "exception_id": exc_id,
@@ -3069,13 +3074,14 @@ elif nav_selection == "🎬 5-Minute Demo":
 
         audit_records = []
         try:
-            audit_records = client.get_audit(limit=15)
+            audit_resp = client.get_audit(limit=15)
+            audit_records = audit_resp.get("items", []) if isinstance(audit_resp, dict) else audit_resp
         except Exception as e:
             st.error(f"Failed to fetch audit events: {e}")
 
         if audit_records:
             df_audit = pd.DataFrame(audit_records)
-            cols_to_show = [c for c in ["id", "action", "entity_type", "entity_id", "actor", "timestamp"] if c in df_audit.columns]
+            cols_to_show = [c for c in ["audit_id", "action", "entity", "entity_id", "actor", "timestamp"] if c in df_audit.columns]
             st.dataframe(df_audit[cols_to_show], hide_index=True, use_container_width=True)
         else:
             st.warning("No audit events recorded yet.")

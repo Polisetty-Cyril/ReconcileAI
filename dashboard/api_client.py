@@ -11,7 +11,11 @@ import json
 import logging
 import os
 from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv, find_dotenv
 import requests
+
+# Load environment variables from .env so API client has access to WEBHOOK_SECRET and configs
+load_dotenv(find_dotenv(usecwd=True))
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +172,12 @@ class ReconcileAPIClient:
     # 3. Reconciliation Execution & Results Endpoints
     # -------------------------------------------------------------------------
 
-    def run_reconciliation(self) -> Dict[str, Any]:
+    def run_reconciliation(self, timeout: int = RECONCILE_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """
         Triggers multi-source reconciliation pipeline via backend API.
         Returns summary with total clusters, match rate, and value-at-risk.
         """
-        return self._post("/reconcile", timeout=RECONCILE_TIMEOUT_SECONDS)
+        return self._post("/reconcile", timeout=timeout)
 
     def get_reconciliation_results(
         self,
@@ -229,16 +233,18 @@ class ReconcileAPIClient:
         self,
         exception_id: str,
         reviewer_id: str = "HUMAN_OPERATOR",
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        reviewer: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Authoritative human approval action for an exception.
         Resolves exception and marks linked reconciliation result as resolved.
         """
-        if not reviewer_id or not reviewer_id.strip():
+        effective_reviewer = (reviewer or reviewer_id or "").strip()
+        if not effective_reviewer:
             raise ValueError("Reviewer ID is mandatory for human approval.")
         payload = {
-            "reviewer_id": reviewer_id.strip(),
+            "reviewer_id": effective_reviewer,
             "notes": notes or "Approved by human operator"
         }
         return self._post(f"/exceptions/{exception_id}/approve", json_data=payload)
@@ -247,16 +253,18 @@ class ReconcileAPIClient:
         self,
         exception_id: str,
         reviewer_id: str = "HUMAN_OPERATOR",
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        reviewer: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Authoritative human rejection action for an exception.
         Sets exception status to REJECTED and marks linked reconciliation result as resolved.
         """
-        if not reviewer_id or not reviewer_id.strip():
+        effective_reviewer = (reviewer or reviewer_id or "").strip()
+        if not effective_reviewer:
             raise ValueError("Reviewer ID is mandatory for human rejection.")
         payload = {
-            "reviewer_id": reviewer_id.strip(),
+            "reviewer_id": effective_reviewer,
             "notes": notes or "Rejected by human operator"
         }
         return self._post(f"/exceptions/{exception_id}/reject", json_data=payload)
